@@ -158,11 +158,17 @@ def dataset_compile(config_file: str, source_file: str, output: str, preview: bo
         with open(config_file, 'r') as f:
             config = yaml.safe_load(f)
 
-        console.print(f"[blue]Compiling dataset:[/blue] {config['dataset']['name']}")
+        # Handle wrapped or unwrapped config
+        if 'dataset' in config:
+            dataset_config = config['dataset']
+        else:
+            dataset_config = config
+
+        console.print(f"[blue]Compiling dataset:[/blue] {dataset_config['name']}")
 
         # Compile to SQL
         compiler = DatasetCompiler(source_table="raw_data")
-        sql = compiler.compile(config['dataset'])
+        sql = compiler.compile(dataset_config)
 
         console.print("[dim]Generated SQL:[/dim]")
         console.print(sql)
@@ -173,7 +179,7 @@ def dataset_compile(config_file: str, source_file: str, output: str, preview: bo
             engine = DuckDBEngine()
 
             # Check if merged dataset (multiple sources)
-            sources = config['dataset'].get("sources")
+            sources = dataset_config.get("sources")
             if sources:
                 # Register each source dataset
                 for source_cfg in sources:
@@ -209,7 +215,7 @@ def dataset_compile(config_file: str, source_file: str, output: str, preview: bo
                     engine.register_file("raw_data", source_file, file_format)
                 else:
                     # Try to get from config
-                    source = config['dataset'].get('source', {})
+                    source = dataset_config.get('source', {})
                     if source.get('table_config'):
                         with open(source['table_config'], 'r') as f:
                             table_config = yaml.safe_load(f)
@@ -237,7 +243,7 @@ def dataset_compile(config_file: str, source_file: str, output: str, preview: bo
             console.print(f"[green]✓[/green] Saved to {output}")
         else:
             # Default output location
-            output = f"data/datasets/{config['dataset']['name']}.parquet"
+            output = f"data/datasets/{dataset_config['name']}.parquet"
             Path(output).parent.mkdir(parents=True, exist_ok=True)
             result_df.to_parquet(output)
             console.print(f"[green]✓[/green] Saved to {output}")
@@ -385,6 +391,50 @@ def model_train(config_file: str, features: str, output: str) -> None:
 
     except Exception as e:
         console.print(f"[red]✗[/red] Training failed: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+@model.command("predict")
+@click.argument("model_name")
+@click.option("--input", "-i", "input_json", required=True, help="JSON string or file path with input features")
+@click.option("--models-dir", "-d", default="data/models", help="Directory containing models")
+def model_predict(model_name: str, input_json: str, models_dir: str) -> None:
+    """Make a prediction using a trained model."""
+    from flowbase.models.trainer import ModelTrainer
+    import json
+    from pathlib import Path
+
+    try:
+        # Parse input
+        if Path(input_json).exists():
+            with open(input_json, 'r') as f:
+                input_data = json.load(f)
+        else:
+            input_data = json.loads(input_json)
+
+        console.print(f"[blue]Making prediction with:[/blue] {model_name}\n")
+        console.print("[dim]Input features:[/dim]")
+        for key, value in input_data.items():
+            console.print(f"  {key}: {value}")
+        console.print()
+
+        # Make prediction
+        trainer = ModelTrainer(models_dir=models_dir)
+        result = trainer.predict(model_name, input_data)
+
+        console.print("[green]✓[/green] Prediction complete\n")
+        console.print(f"[bold]Prediction:[/bold] {result['prediction']}")
+
+        # Show probabilities if available
+        if "probabilities" in result:
+            console.print("\n[bold]Class Probabilities:[/bold]")
+            for cls, prob in result["probabilities"].items():
+                console.print(f"  Class {cls}: {prob:.4f} ({prob*100:.2f}%)")
+
+    except Exception as e:
+        console.print(f"[red]✗[/red] Prediction failed: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)

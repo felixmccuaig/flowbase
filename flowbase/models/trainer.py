@@ -197,3 +197,81 @@ class ModelTrainer:
             "train_size": len(X_train),
             "test_size": len(X_test)
         }
+
+    def load_model(self, model_name: str) -> Tuple[Any, Dict[str, Any]]:
+        """Load a trained model and its metadata.
+
+        Args:
+            model_name: Name of the model to load
+
+        Returns:
+            Tuple of (model, metadata)
+        """
+        model_path = self.models_dir / f"{model_name}.pkl"
+        metadata_path = self.models_dir / f"{model_name}_metadata.json"
+
+        if not model_path.exists():
+            raise FileNotFoundError(f"Model not found: {model_path}")
+
+        # Load model
+        with open(model_path, "rb") as f:
+            model = pickle.load(f)
+
+        # Load metadata
+        with open(metadata_path, "r") as f:
+            metadata = json.load(f)
+
+        return model, metadata
+
+    def predict(self, model_name: str, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Make a prediction using a trained model.
+
+        Args:
+            model_name: Name of the model to use
+            input_data: Dictionary of feature values
+
+        Returns:
+            Dictionary with prediction results
+        """
+        # Load model and metadata
+        model, metadata = self.load_model(model_name)
+
+        # Get expected features
+        expected_features = metadata["features"]
+
+        # Validate input
+        missing_features = set(expected_features) - set(input_data.keys())
+        if missing_features:
+            raise ValueError(f"Missing required features: {missing_features}")
+
+        # Create DataFrame with correct feature order
+        input_df = pd.DataFrame([input_data])[expected_features]
+
+        # Handle missing values same way as training
+        for col in input_df.columns:
+            if input_df[col].dtype in ['float64', 'int64']:
+                if pd.isna(input_df[col].iloc[0]):
+                    input_df[col] = 0  # Default to 0 for inference
+            else:
+                if pd.isna(input_df[col].iloc[0]):
+                    input_df[col] = 0
+
+        # Make prediction
+        prediction = model.predict(input_df)[0]
+
+        # Get prediction probability if classifier
+        result = {
+            "prediction": float(prediction) if isinstance(prediction, (int, float)) else str(prediction),
+            "model": model_name,
+            "features_used": expected_features
+        }
+
+        # Add probabilities for classifiers
+        if hasattr(model, "predict_proba"):
+            probabilities = model.predict_proba(input_df)[0]
+            classes = model.classes_ if hasattr(model, "classes_") else list(range(len(probabilities)))
+            result["probabilities"] = {
+                str(cls): float(prob) for cls, prob in zip(classes, probabilities)
+            }
+
+        return result
