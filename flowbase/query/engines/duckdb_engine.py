@@ -30,7 +30,7 @@ class DuckDBEngine(QueryEngine):
             # Use all available cores, but ensure at least 1
             threads = max(1, os.cpu_count() or 1)
             self.conn.execute(f"SET threads TO {threads}")
-            self.conn.execute("SET memory_limit = '4GB'")
+            self.conn.execute("SET memory_limit = '16GB'")
         except Exception:
             # If configuration fails, continue with defaults
             pass

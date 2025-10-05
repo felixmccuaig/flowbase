@@ -143,12 +143,12 @@ def dataset() -> None:
 
 @dataset.command("compile")
 @click.argument("config_file")
-@click.argument("source_file")
+@click.argument("source_file", required=False)
 @click.option("--output", "-o", help="Output parquet file")
 @click.option("--preview", is_flag=True, help="Show preview of results")
 def dataset_compile(config_file: str, source_file: str, output: str, preview: bool) -> None:
     """Compile a dataset from source data."""
-    from flowbase.pipelines.dataset_compiler import DatasetCompiler
+    from flowbase.pipelines.dataset_compiler import DatasetCompiler, load_dataset_config
     from flowbase.query.engines.duckdb_engine import DuckDBEngine
     import yaml
     from pathlib import Path
@@ -158,11 +158,11 @@ def dataset_compile(config_file: str, source_file: str, output: str, preview: bo
         with open(config_file, 'r') as f:
             config = yaml.safe_load(f)
 
-        console.print(f"[blue]Compiling dataset:[/blue] {config['name']}")
+        console.print(f"[blue]Compiling dataset:[/blue] {config['dataset']['name']}")
 
         # Compile to SQL
         compiler = DatasetCompiler(source_table="raw_data")
-        sql = compiler.compile(config)
+        sql = compiler.compile(config['dataset'])
 
         console.print("[dim]Generated SQL:[/dim]")
         console.print(sql)
@@ -172,10 +172,54 @@ def dataset_compile(config_file: str, source_file: str, output: str, preview: bo
         with console.status("[bold blue]Executing..."):
             engine = DuckDBEngine()
 
-            # Register source
-            path = Path(source_file)
-            file_format = "parquet" if path.suffix == ".parquet" else "csv"
-            engine.register_file("raw_data", source_file, file_format)
+            # Check if merged dataset (multiple sources)
+            sources = config['dataset'].get("sources")
+            if sources:
+                # Register each source dataset
+                for source_cfg in sources:
+                    source_name = source_cfg['name']
+                    dataset_config_path = source_cfg.get('dataset_config')
+
+                    if dataset_config_path:
+                        # Load and compile the source dataset
+                        source_config = load_dataset_config(dataset_config_path)
+                        source_sql = compiler.compile(source_config['dataset'])
+
+                        # Register source table from config
+                        table_config_path = source_config['dataset']['source'].get('table_config')
+                        if table_config_path:
+                            with open(table_config_path, 'r') as f:
+                                table_config = yaml.safe_load(f)
+                            table_name = table_config['table']['name']
+                            base_path = table_config['table']['destination']['base_path']
+                            file_format = table_config['table']['destination']['file_format']
+                            pattern = f"{base_path}/*.{file_format}"
+
+                            console.print(f"[dim]Registering source '{table_name}' from {pattern}[/dim]")
+                            engine.execute(f"CREATE OR REPLACE VIEW {table_name} AS SELECT * FROM '{pattern}'")
+
+                        # Create view for this source dataset
+                        console.print(f"[dim]Creating source view '{source_name}'[/dim]")
+                        engine.execute(f"CREATE OR REPLACE VIEW {source_name} AS {source_sql}")
+            else:
+                # Single source - register file
+                if source_file:
+                    path = Path(source_file)
+                    file_format = "parquet" if path.suffix == ".parquet" else "csv"
+                    engine.register_file("raw_data", source_file, file_format)
+                else:
+                    # Try to get from config
+                    source = config['dataset'].get('source', {})
+                    if source.get('table_config'):
+                        with open(source['table_config'], 'r') as f:
+                            table_config = yaml.safe_load(f)
+                        table_name = table_config['table']['name']
+                        base_path = table_config['table']['destination']['base_path']
+                        file_format = table_config['table']['destination']['file_format']
+                        pattern = f"{base_path}/*.{file_format}"
+
+                        console.print(f"[dim]Registering table '{table_name}' from {pattern}[/dim]")
+                        engine.execute(f"CREATE OR REPLACE VIEW {table_name} AS SELECT * FROM '{pattern}'")
 
             # Execute
             result_df = engine.execute(sql)
@@ -193,7 +237,7 @@ def dataset_compile(config_file: str, source_file: str, output: str, preview: bo
             console.print(f"[green]✓[/green] Saved to {output}")
         else:
             # Default output location
-            output = f"data/datasets/{config['name']}.parquet"
+            output = f"data/datasets/{config['dataset']['name']}.parquet"
             Path(output).parent.mkdir(parents=True, exist_ok=True)
             result_df.to_parquet(output)
             console.print(f"[green]✓[/green] Saved to {output}")
@@ -202,6 +246,8 @@ def dataset_compile(config_file: str, source_file: str, output: str, preview: bo
 
     except Exception as e:
         console.print(f"[red]✗[/red] Failed: {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
 
@@ -227,6 +273,10 @@ def features_compile(config_file: str, dataset: str, output: str, preview: bool)
         # Load config
         with open(config_file, 'r') as f:
             config = yaml.safe_load(f)
+
+        # Handle wrapped config
+        if 'features' in config:
+            config = config['features']
 
         console.print(f"[blue]Compiling features:[/blue] {config['name']}")
 
@@ -308,6 +358,10 @@ def model_train(config_file: str, features: str, output: str) -> None:
         # Load config
         with open(config_file, 'r') as f:
             config = yaml.safe_load(f)
+
+        # Handle wrapped config
+        if 'model' in config:
+            config = config['model']
 
         console.print(f"[blue]Training model:[/blue] {config['name']}")
 

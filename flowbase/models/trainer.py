@@ -117,7 +117,8 @@ class ModelTrainer:
         )
 
         # Create and train model
-        model_config = config["model"]
+        # Config might already be unwrapped by CLI
+        model_config = config.get("model", config)
         model = self.create_model(model_config)
 
         model.fit(X_train, y_train)

@@ -54,6 +54,11 @@ data/datasets/
 data/features/
 data/models/
 data/evals/
+data/tables/
+data/scrapers/
+
+# Private scraper examples
+examples/scrapers/greyhounds/
 
 # But keep the directory structure
 !data/.gitkeep
