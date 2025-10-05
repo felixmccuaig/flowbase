@@ -940,6 +940,157 @@ def scraper_list(dir: str) -> None:
 
 
 @cli.command()
+@click.option("--database", "-d", help="DuckDB database file (default: in-memory)")
+@click.option("--dataset", "-s", multiple=True, help="Load dataset by name (from data/datasets/)")
+@click.option("--features", "-f", multiple=True, help="Load feature set by name (from data/features/)")
+@click.option("--execute", "-e", help="Execute SQL and exit")
+def query(database: str, dataset: tuple, features: tuple, execute: str) -> None:
+    """Interactive SQL query mode.
+
+    Examples:
+      # Start interactive mode
+      flowbase query
+
+      # Load datasets and feature sets
+      flowbase query -s iris_clean -f iris_features
+
+      # Execute a query directly
+      flowbase query -s housing_clean -e "SELECT * FROM housing_clean LIMIT 10"
+
+      # Use persistent database
+      flowbase query -d data/warehouse.db -s iris_clean
+    """
+    from flowbase.query.engines.duckdb_engine import DuckDBEngine
+    from pathlib import Path
+
+    try:
+        # Initialize engine
+        console.print("[blue]Connecting to database...[/blue]")
+        engine = DuckDBEngine(database=database)
+        console.print(f"[green]✓[/green] Connected to {database or 'in-memory database'}\n")
+
+        # Load datasets
+        for dataset_name in dataset:
+            parquet_path = Path(f"data/datasets/{dataset_name}.parquet")
+            if not parquet_path.exists():
+                console.print(f"[red]✗[/red] Dataset not found: {parquet_path}")
+                continue
+
+            engine.register_file(dataset_name, str(parquet_path), "parquet")
+            console.print(f"[green]✓[/green] Loaded dataset '{dataset_name}'")
+
+        # Load feature sets
+        for feature_name in features:
+            parquet_path = Path(f"data/features/{feature_name}.parquet")
+            if not parquet_path.exists():
+                console.print(f"[red]✗[/red] Feature set not found: {parquet_path}")
+                continue
+
+            engine.register_file(feature_name, str(parquet_path), "parquet")
+            console.print(f"[green]✓[/green] Loaded feature set '{feature_name}'")
+
+        if dataset or features:
+            console.print()
+
+        # Execute single query if provided
+        if execute:
+            result = engine.execute(execute)
+            console.print(f"[green]✓[/green] {len(result):,} rows returned\n")
+            console.print(result.to_string())
+            engine.close()
+            return
+
+        # Interactive mode
+        console.print("[bold]Interactive SQL Query Mode[/bold]")
+        console.print("[dim]Type your SQL queries. Special commands:[/dim]")
+        console.print("[dim]  .tables    - List all tables[/dim]")
+        console.print("[dim]  .exit      - Exit[/dim]")
+        console.print("[dim]  .help      - Show this help[/dim]")
+        console.print()
+
+        query_buffer = []
+
+        while True:
+            try:
+                # Prompt
+                prompt = "flowbase> " if not query_buffer else "      ...> "
+                line = input(prompt)
+
+                # Handle special commands
+                if line.strip() == ".exit":
+                    console.print("[yellow]Goodbye![/yellow]")
+                    break
+                elif line.strip() == ".tables":
+                    tables = engine.list_tables()
+                    if tables:
+                        console.print("\n[bold]Tables:[/bold]")
+                        for table in tables:
+                            console.print(f"  • {table}")
+                    else:
+                        console.print("[yellow]No tables found[/yellow]")
+                    console.print()
+                    continue
+                elif line.strip() == ".help":
+                    console.print("\n[bold]Special Commands:[/bold]")
+                    console.print("  .tables    - List all tables")
+                    console.print("  .exit      - Exit interactive mode")
+                    console.print("  .help      - Show this help")
+                    console.print("\n[bold]SQL Examples:[/bold]")
+                    console.print("  SELECT * FROM table_name LIMIT 10")
+                    console.print("  SELECT COUNT(*) FROM table_name")
+                    console.print("  DESCRIBE table_name")
+                    console.print()
+                    continue
+                elif line.strip() == "":
+                    continue
+
+                # Build query
+                query_buffer.append(line)
+
+                # Check if query is complete (ends with semicolon)
+                if line.rstrip().endswith(";"):
+                    query_sql = " ".join(query_buffer).rstrip(";")
+                    query_buffer = []
+
+                    try:
+                        # Execute query
+                        result = engine.execute(query_sql)
+
+                        # Display results
+                        console.print(f"\n[green]✓[/green] {len(result):,} rows × {len(result.columns)} columns returned")
+
+                        if len(result) > 0:
+                            # Limit display to 100 rows
+                            display_limit = 100
+                            if len(result) > display_limit:
+                                console.print(f"[dim]Showing first {display_limit} rows...[/dim]")
+                                console.print(result.head(display_limit).to_string())
+                            else:
+                                console.print(result.to_string())
+
+                        console.print()
+
+                    except Exception as e:
+                        console.print(f"[red]✗[/red] Query error: {e}\n")
+
+            except KeyboardInterrupt:
+                console.print("\n[yellow]Query cancelled. Type .exit to quit.[/yellow]\n")
+                query_buffer = []
+                continue
+            except EOFError:
+                console.print("\n[yellow]Goodbye![/yellow]")
+                break
+
+        engine.close()
+
+    except Exception as e:
+        console.print(f"[red]✗[/red] Error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+@cli.command()
 @click.option("--port", default=8501, help="Port to run the UI on")
 @click.option("--mode", default="ide", type=click.Choice(["ide", "ml", "explore", "features"]), help="UI mode")
 def ui(port: int, mode: str) -> None:
