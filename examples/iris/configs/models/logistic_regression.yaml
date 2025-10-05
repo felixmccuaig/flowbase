@@ -1,0 +1,36 @@
+name: iris_logistic_regression
+description: Logistic Regression for iris species prediction
+version: 1.0
+
+feature_set: iris_features
+target: species
+
+# Use subset of features for simpler model
+features:
+  - sepal_length
+  - sepal_width
+  - petal_length
+  - petal_width
+
+model:
+  type: sklearn
+  class: linear_model.LogisticRegression
+  hyperparameters:
+    max_iter: 1000
+    random_state: 42
+    multi_class: multinomial
+    solver: lbfgs
+
+split:
+  method: random
+  test_size: 0.3
+  random_state: 42
+
+metrics:
+  - accuracy
+  - f1
+
+cross_validation:
+  enabled: true
+  n_folds: 5
+  random_state: 42

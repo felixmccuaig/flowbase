@@ -1,0 +1,60 @@
+name: housing_random_forest_medium
+description: Random Forest with medium-complexity features (no advanced interactions)
+feature_set: housing_features_comprehensive
+target: median_house_value
+
+# Medium feature subset - core features plus some engineering, but no heavy interactions
+features:
+  # Geographic
+  - longitude
+  - latitude
+  - min_distance_to_city
+
+  # Economic
+  - median_income
+  - income_log
+
+  # Housing characteristics
+  - housing_median_age
+  - rooms_per_household
+  - bedrooms_per_room
+  - population_per_household
+  - bedrooms_per_household
+
+  # Density
+  - room_density
+  - bedroom_density
+
+  # Simple flags
+  - is_new_development
+  - is_old_housing
+  - is_crowded
+
+  # Ocean proximity
+  - ocean_1h
+  - ocean_inland
+  - ocean_near
+  - ocean_bay
+
+  # Regional averages (not interactions)
+  - avg_income_by_ocean
+  - avg_age_by_ocean
+
+# Model configuration - Random Forest
+model:
+  type: sklearn
+  class: ensemble.RandomForestRegressor
+  hyperparameters:
+    n_estimators: 150
+    max_depth: 20
+    min_samples_split: 4
+    min_samples_leaf: 2
+    max_features: sqrt
+    random_state: 42
+    n_jobs: -1
+
+# Train/test split
+split:
+  method: random
+  test_size: 0.2
+  random_state: 42

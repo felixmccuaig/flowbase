@@ -1,0 +1,119 @@
+name: survival_features
+description: Engineered features for Titanic survival prediction
+dataset: titanic_clean
+
+# Computed features
+features:
+  # Family size features
+  - name: family_size
+    expression: "SibSp + Parch + 1"
+    description: Total family members aboard (including passenger)
+
+  - name: is_alone
+    expression: "CASE WHEN SibSp + Parch = 0 THEN 1 ELSE 0 END"
+    description: Binary flag for passengers traveling alone
+
+  # Age features (handling NULLs)
+  - name: age_filled
+    expression: "COALESCE(Age, 29.7)"
+    description: Age with missing values filled with median (29.7)
+
+  - name: is_child
+    expression: "CASE WHEN Age < 18 THEN 1 ELSE 0 END"
+    description: Binary flag for children (under 18)
+
+  - name: age_group
+    expression: |
+      CASE
+        WHEN Age IS NULL THEN 'Unknown'
+        WHEN Age < 18 THEN 'Child'
+        WHEN Age < 35 THEN 'Young Adult'
+        WHEN Age < 60 THEN 'Adult'
+        ELSE 'Senior'
+      END
+    description: Age category
+
+  # Fare features
+  - name: fare_per_person
+    expression: "Fare / GREATEST(SibSp + Parch + 1, 1)"
+    description: Fare divided by family size
+
+  - name: fare_category
+    expression: |
+      CASE
+        WHEN Fare < 10 THEN 'Low'
+        WHEN Fare < 30 THEN 'Medium'
+        WHEN Fare < 100 THEN 'High'
+        ELSE 'Very High'
+      END
+    description: Fare category
+
+  # Title extraction from name
+  - name: title
+    expression: "REGEXP_EXTRACT(Name, ', ([A-Za-z]+)\\.', 1)"
+    description: Extract title from passenger name (Mr, Mrs, Miss, etc)
+
+  # Cabin features
+  - name: has_cabin
+    expression: "CASE WHEN Cabin IS NOT NULL THEN 1 ELSE 0 END"
+    description: Binary flag for passengers with cabin information
+
+  - name: cabin_deck
+    expression: "CASE WHEN Cabin IS NOT NULL THEN SUBSTRING(Cabin, 1, 1) ELSE 'U' END"
+    description: Cabin deck letter (U for Unknown)
+
+  # Interaction features
+  - name: class_age_interaction
+    expression: "Pclass * COALESCE(Age, 29.7)"
+    description: Interaction between passenger class and age
+
+  - name: sex_class_interaction
+    expression: "CONCAT(Sex, '_', CAST(Pclass AS VARCHAR))"
+    description: Combined sex and class feature
+
+  # One-hot encoding for categorical variables
+  - name: sex_male
+    expression: "CASE WHEN Sex = 'male' THEN 1 ELSE 0 END"
+
+  - name: sex_female
+    expression: "CASE WHEN Sex = 'female' THEN 1 ELSE 0 END"
+
+  - name: pclass_1
+    expression: "CASE WHEN Pclass = 1 THEN 1 ELSE 0 END"
+
+  - name: pclass_2
+    expression: "CASE WHEN Pclass = 2 THEN 1 ELSE 0 END"
+
+  - name: pclass_3
+    expression: "CASE WHEN Pclass = 3 THEN 1 ELSE 0 END"
+
+  - name: embarked_S
+    expression: "CASE WHEN Embarked = 'S' THEN 1 ELSE 0 END"
+
+  - name: embarked_C
+    expression: "CASE WHEN Embarked = 'C' THEN 1 ELSE 0 END"
+
+  - name: embarked_Q
+    expression: "CASE WHEN Embarked = 'Q' THEN 1 ELSE 0 END"
+
+# Window features (aggregations by group)
+window_features:
+  # Average survival rate by passenger class
+  - name: avg_fare_by_class
+    function: AVG
+    column: Fare
+    partition_by: [Pclass]
+    description: Average fare for passenger's class
+
+  # Count of passengers with same title
+  - name: title_count
+    function: COUNT
+    partition_by: [title]
+    description: Number of passengers with same title
+
+  # Survival rate by embarkation (requires joining with actual survival)
+  - name: family_size_rank
+    function: RANK
+    partition_by: [Pclass]
+    order_by: [family_size DESC]
+    description: Rank of family size within passenger class

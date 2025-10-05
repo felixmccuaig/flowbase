@@ -1,0 +1,23 @@
+name: iris_raw
+description: Raw iris dataset from CSV
+version: 1.0
+
+# Data source metadata
+type: csv
+path: examples/iris/data/iris.csv
+format: csv
+
+# Schema information (for documentation)
+schema:
+  sepal_length: DOUBLE (centimeters)
+  sepal_width: DOUBLE (centimeters)
+  petal_length: DOUBLE (centimeters)
+  petal_width: DOUBLE (centimeters)
+  species: VARCHAR (setosa, versicolor, virginica)
+
+# Data quality notes
+notes: |
+  - 150 samples total
+  - 50 samples per species
+  - No missing values
+  - All measurements in centimeters

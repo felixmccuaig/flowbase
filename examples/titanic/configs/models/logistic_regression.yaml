@@ -1,0 +1,43 @@
+name: titanic_logistic_regression
+description: Logistic Regression classifier for Titanic survival prediction
+feature_set: survival_features
+target: Survived
+
+# Features to use (same as other models)
+features:
+  - Pclass
+  - Age
+  - SibSp
+  - Parch
+  - Fare
+  - family_size
+  - is_alone
+  - age_filled
+  - is_child
+  - fare_per_person
+  - has_cabin
+  - class_age_interaction
+  - sex_male
+  - sex_female
+  - pclass_1
+  - pclass_2
+  - pclass_3
+  - embarked_S
+  - embarked_C
+  - embarked_Q
+  - avg_fare_by_class
+
+# Model configuration
+model:
+  type: sklearn
+  class: linear_model.LogisticRegression
+  hyperparameters:
+    max_iter: 1000
+    random_state: 42
+    solver: liblinear
+
+# Train/test split
+split:
+  method: random
+  test_size: 0.2
+  random_state: 42

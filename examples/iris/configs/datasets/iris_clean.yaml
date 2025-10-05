@@ -1,0 +1,50 @@
+name: iris_clean
+description: Cleaned iris dataset with proper types and quality checks
+version: 1.0
+
+# Define columns with explicit types
+columns:
+  # Measurements (ensure numeric types)
+  - name: sepal_length
+    type: DOUBLE
+
+  - name: sepal_width
+    type: DOUBLE
+
+  - name: petal_length
+    type: DOUBLE
+
+  - name: petal_width
+    type: DOUBLE
+
+  # Species (categorical target)
+  - name: species
+    type: VARCHAR
+    transform: trim
+
+# Data quality filters
+filters:
+  # Ensure all measurements are positive
+  - column: sepal_length
+    operator: ">"
+    value: 0
+
+  - column: sepal_width
+    operator: ">"
+    value: 0
+
+  - column: petal_length
+    operator: ">"
+    value: 0
+
+  - column: petal_width
+    operator: ">"
+    value: 0
+
+  # Ensure species is valid
+  - column: species
+    operator: in
+    value: ["setosa", "versicolor", "virginica"]
+
+# Order by species and sepal length
+order_by: [species, sepal_length DESC]

@@ -1,0 +1,206 @@
+name: housing_features_comprehensive
+description: Comprehensive feature engineering for California Housing dataset
+dataset: housing_clean
+
+# Computed features - creating a rich feature set
+features:
+  # ===== BASIC RATIO FEATURES =====
+  - name: rooms_per_household
+    expression: "total_rooms / households"
+    description: Average rooms per household
+
+  - name: bedrooms_per_room
+    expression: "COALESCE(total_bedrooms, total_rooms * 0.2) / total_rooms"
+    description: Bedroom to room ratio (fill missing with 20% estimate)
+
+  - name: population_per_household
+    expression: "population / households"
+    description: Average household size
+
+  - name: bedrooms_per_household
+    expression: "COALESCE(total_bedrooms, total_rooms * 0.2) / households"
+    description: Average bedrooms per household
+
+  # ===== DENSITY FEATURES =====
+  - name: room_density
+    expression: "total_rooms / population"
+    description: Rooms per person
+
+  - name: bedroom_density
+    expression: "COALESCE(total_bedrooms, total_rooms * 0.2) / population"
+    description: Bedrooms per person
+
+  # ===== INCOME-BASED FEATURES =====
+  - name: income_category
+    expression: |
+      CASE
+        WHEN median_income < 2.0 THEN 'low'
+        WHEN median_income < 4.0 THEN 'medium'
+        WHEN median_income < 6.0 THEN 'high'
+        ELSE 'very_high'
+      END
+    description: Income category
+
+  - name: income_per_household_member
+    expression: "median_income / (population / households)"
+    description: Income per household member
+
+  - name: income_squared
+    expression: "median_income * median_income"
+    description: Squared income for non-linear modeling
+
+  - name: income_log
+    expression: "LOG(median_income + 1)"
+    description: Log-transformed income
+
+  # ===== AGE-BASED FEATURES =====
+  - name: is_new_development
+    expression: "CASE WHEN housing_median_age < 10 THEN 1 ELSE 0 END"
+    description: Flag for new developments (< 10 years)
+
+  - name: is_old_housing
+    expression: "CASE WHEN housing_median_age > 40 THEN 1 ELSE 0 END"
+    description: Flag for old housing (> 40 years)
+
+  - name: age_category
+    expression: |
+      CASE
+        WHEN housing_median_age < 10 THEN 'new'
+        WHEN housing_median_age < 25 THEN 'modern'
+        WHEN housing_median_age < 40 THEN 'established'
+        ELSE 'old'
+      END
+    description: Age category
+
+  # ===== GEOGRAPHIC FEATURES =====
+  - name: lat_lon_interaction
+    expression: "latitude * longitude"
+    description: Geographic interaction term
+
+  - name: distance_to_la
+    expression: "SQRT(POW(latitude - 34.05, 2) + POW(longitude + 118.24, 2))"
+    description: Approximate distance to Los Angeles
+
+  - name: distance_to_sf
+    expression: "SQRT(POW(latitude - 37.77, 2) + POW(longitude + 122.42, 2))"
+    description: Approximate distance to San Francisco
+
+  - name: distance_to_sd
+    expression: "SQRT(POW(latitude - 32.72, 2) + POW(longitude + 117.16, 2))"
+    description: Approximate distance to San Diego
+
+  - name: min_distance_to_city
+    expression: |
+      LEAST(
+        SQRT(POW(latitude - 34.05, 2) + POW(longitude + 118.24, 2)),
+        SQRT(POW(latitude - 37.77, 2) + POW(longitude + 122.42, 2)),
+        SQRT(POW(latitude - 32.72, 2) + POW(longitude + 117.16, 2))
+      )
+    description: Distance to nearest major city
+
+  # ===== LOCATION BINNING =====
+  - name: latitude_bin
+    expression: "FLOOR(latitude)"
+    description: Latitude rounded to integer
+
+  - name: longitude_bin
+    expression: "FLOOR(longitude)"
+    description: Longitude rounded to integer
+
+  # ===== CROWDING FEATURES =====
+  - name: is_crowded
+    expression: "CASE WHEN (population / households) > 3.5 THEN 1 ELSE 0 END"
+    description: Flag for crowded areas
+
+  - name: crowding_score
+    expression: "(population / households) * (1.0 / rooms_per_household)"
+    description: Combined crowding metric
+
+  # ===== INTERACTION FEATURES =====
+  - name: income_age_interaction
+    expression: "median_income * housing_median_age"
+    description: Income and age interaction
+
+  - name: income_rooms_interaction
+    expression: "median_income * rooms_per_household"
+    description: Income and rooms interaction
+
+  # ===== OCEAN PROXIMITY ONE-HOT ENCODING =====
+  - name: ocean_1h
+    expression: "CASE WHEN ocean_proximity = '<1H OCEAN' THEN 1 ELSE 0 END"
+    description: Within 1 hour of ocean
+
+  - name: ocean_inland
+    expression: "CASE WHEN ocean_proximity = 'INLAND' THEN 1 ELSE 0 END"
+    description: Inland location
+
+  - name: ocean_near
+    expression: "CASE WHEN ocean_proximity = 'NEAR OCEAN' THEN 1 ELSE 0 END"
+    description: Near ocean
+
+  - name: ocean_bay
+    expression: "CASE WHEN ocean_proximity = 'NEAR BAY' THEN 1 ELSE 0 END"
+    description: Near bay
+
+  - name: ocean_island
+    expression: "CASE WHEN ocean_proximity = 'ISLAND' THEN 1 ELSE 0 END"
+    description: Island location
+
+  # ===== INCOME CATEGORY ONE-HOT =====
+  - name: income_low
+    expression: "CASE WHEN median_income < 2.0 THEN 1 ELSE 0 END"
+
+  - name: income_medium
+    expression: "CASE WHEN median_income >= 2.0 AND median_income < 4.0 THEN 1 ELSE 0 END"
+
+  - name: income_high
+    expression: "CASE WHEN median_income >= 4.0 AND median_income < 6.0 THEN 1 ELSE 0 END"
+
+  - name: income_very_high
+    expression: "CASE WHEN median_income >= 6.0 THEN 1 ELSE 0 END"
+
+# Window features for regional comparisons
+window_features:
+  # Average values by ocean proximity
+  - name: avg_income_by_ocean
+    function: AVG
+    column: median_income
+    partition_by: [ocean_proximity]
+    description: Average income for this ocean proximity category
+
+  - name: avg_age_by_ocean
+    function: AVG
+    column: housing_median_age
+    partition_by: [ocean_proximity]
+    description: Average housing age for this ocean proximity
+
+  - name: avg_value_by_ocean
+    function: AVG
+    column: median_house_value
+    partition_by: [ocean_proximity]
+    description: Average house value for this ocean proximity
+
+  # Ranking features
+  - name: income_rank_by_ocean
+    function: RANK
+    partition_by: [ocean_proximity]
+    order_by: [median_income DESC]
+    description: Income rank within ocean proximity group
+
+  - name: value_rank_overall
+    function: RANK
+    order_by: [median_house_value DESC]
+    description: Overall house value rank
+
+  # Regional density metrics
+  - name: count_by_lat_lon_bin
+    function: COUNT
+    partition_by: [latitude_bin, longitude_bin]
+    description: Number of districts in same lat/lon grid cell
+
+  # Income percentile within region
+  - name: income_percentile_by_region
+    function: PERCENT_RANK
+    partition_by: [ocean_proximity]
+    order_by: [median_income]
+    description: Income percentile within ocean proximity group

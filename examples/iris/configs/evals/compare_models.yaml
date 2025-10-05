@@ -1,0 +1,33 @@
+name: iris_model_comparison
+description: Compare multiple models on iris classification
+version: 1.0
+
+# Models to evaluate
+models:
+  - random_forest
+  - logistic_regression
+
+# Evaluation dataset
+dataset: iris_features
+
+# Metrics to compare
+metrics:
+  - accuracy
+  - f1
+  - precision
+  - recall
+  - roc_auc
+
+# Evaluation settings
+settings:
+  # Use same split for fair comparison
+  random_state: 42
+  test_size: 0.3
+
+  # Generate evaluation artifacts
+  generate_confusion_matrix: true
+  generate_roc_curves: true
+  generate_feature_importance: true
+
+# Output location
+output_dir: examples/iris/results

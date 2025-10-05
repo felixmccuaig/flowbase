@@ -1,0 +1,91 @@
+name: housing_clean
+description: Cleaned California Housing dataset with proper types and quality checks
+version: 1.0
+
+# Define columns with explicit types
+columns:
+  # Geographic features
+  - name: longitude
+    type: DOUBLE
+
+  - name: latitude
+    type: DOUBLE
+
+  # Housing characteristics
+  - name: housing_median_age
+    type: DOUBLE
+
+  - name: total_rooms
+    type: DOUBLE
+
+  - name: total_bedrooms
+    type: DOUBLE
+    # Has 207 missing values - will be NULL
+
+  - name: population
+    type: DOUBLE
+
+  - name: households
+    type: DOUBLE
+
+  # Economic features
+  - name: median_income
+    type: DOUBLE
+
+  # Target variable
+  - name: median_house_value
+    type: DOUBLE
+
+  # Categorical
+  - name: ocean_proximity
+    type: VARCHAR
+    transform: trim
+
+# Data quality filters
+filters:
+  # Ensure valid coordinates (California bounds)
+  - column: longitude
+    operator: ">="
+    value: -125
+
+  - column: longitude
+    operator: "<="
+    value: -114
+
+  - column: latitude
+    operator: ">="
+    value: 32
+
+  - column: latitude
+    operator: "<="
+    value: 42
+
+  # Ensure positive values for counts
+  - column: total_rooms
+    operator: ">"
+    value: 0
+
+  - column: population
+    operator: ">"
+    value: 0
+
+  - column: households
+    operator: ">"
+    value: 0
+
+  # Ensure positive income and house value
+  - column: median_income
+    operator: ">"
+    value: 0
+
+  - column: median_house_value
+    operator: ">"
+    value: 0
+
+  # Valid ocean proximity categories
+  - column: ocean_proximity
+    operator: in
+    value: ["<1H OCEAN", "INLAND", "NEAR OCEAN", "NEAR BAY", "ISLAND"]
+
+# Order by location
+order_by: [latitude DESC, longitude]

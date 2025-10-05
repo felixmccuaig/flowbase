@@ -1,0 +1,37 @@
+name: housing_baseline_simple
+description: Simple baseline model using only basic features
+feature_set: housing_features_comprehensive
+target: median_house_value
+
+# Simple feature subset - just basic ratios and raw features
+features:
+  # Original features
+  - longitude
+  - latitude
+  - housing_median_age
+  - median_income
+
+  # Basic ratios
+  - rooms_per_household
+  - bedrooms_per_room
+  - population_per_household
+
+  # Ocean proximity encoding
+  - ocean_1h
+  - ocean_inland
+  - ocean_near
+  - ocean_bay
+
+# Model configuration - simple linear model
+model:
+  type: sklearn
+  class: linear_model.Ridge
+  hyperparameters:
+    alpha: 1.0
+    random_state: 42
+
+# Train/test split
+split:
+  method: random
+  test_size: 0.2
+  random_state: 42

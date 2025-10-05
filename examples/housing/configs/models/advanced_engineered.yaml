@@ -1,0 +1,80 @@
+name: housing_advanced_engineered
+description: Advanced model using heavily engineered features
+feature_set: housing_features_comprehensive
+target: median_house_value
+
+# Advanced feature subset - using engineered features, interactions, and aggregations
+features:
+  # Geographic features
+  - longitude
+  - latitude
+  - distance_to_la
+  - distance_to_sf
+  - distance_to_sd
+  - min_distance_to_city
+  - lat_lon_interaction
+
+  # Economic features (transformed)
+  - median_income
+  - income_squared
+  - income_log
+  - income_per_household_member
+
+  # Density and crowding
+  - rooms_per_household
+  - bedrooms_per_room
+  - population_per_household
+  - room_density
+  - bedroom_density
+  - is_crowded
+  - crowding_score
+
+  # Age features
+  - housing_median_age
+  - is_new_development
+  - is_old_housing
+
+  # Interaction features
+  - income_age_interaction
+  - income_rooms_interaction
+
+  # Ocean proximity encoding
+  - ocean_1h
+  - ocean_inland
+  - ocean_near
+  - ocean_bay
+  - ocean_island
+
+  # Income category encoding
+  - income_low
+  - income_medium
+  - income_high
+  - income_very_high
+
+  # Window/aggregation features (regional comparisons)
+  - avg_income_by_ocean
+  - avg_age_by_ocean
+  - avg_value_by_ocean
+  - income_rank_by_ocean
+  - count_by_lat_lon_bin
+  - income_percentile_by_region
+
+# Model configuration - powerful ensemble method
+model:
+  type: sklearn
+  class: ensemble.GradientBoostingRegressor
+  hyperparameters:
+    n_estimators: 200
+    learning_rate: 0.1
+    max_depth: 5
+    min_samples_split: 5
+    min_samples_leaf: 2
+    subsample: 0.8
+    random_state: 42
+    verbose: 0
+
+# Train/test split
+split:
+  method: random
+  test_size: 0.2
+  random_state: 42

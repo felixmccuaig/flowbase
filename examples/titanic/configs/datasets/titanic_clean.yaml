@@ -1,0 +1,86 @@
+name: titanic_clean
+description: Cleaned Titanic dataset with proper types, missing value handling, and quality checks
+version: 1.0
+
+# Define columns with explicit types and transformations
+columns:
+  # Identifiers
+  - name: PassengerId
+    type: INTEGER
+
+  # Target variable
+  - name: Survived
+    type: INTEGER
+
+  # Passenger class (1=1st, 2=2nd, 3=3rd)
+  - name: Pclass
+    type: INTEGER
+
+  # Demographics
+  - name: Name
+    type: VARCHAR
+    transform: trim
+
+  - name: Sex
+    type: VARCHAR
+    transform: lower  # Normalize to lowercase
+
+  - name: Age
+    type: DOUBLE
+    # Will be NULL for missing values - handle in features
+
+  # Family relationships
+  - name: SibSp
+    type: INTEGER  # Siblings/Spouses aboard
+
+  - name: Parch
+    type: INTEGER  # Parents/Children aboard
+
+  # Ticket info
+  - name: Ticket
+    type: VARCHAR
+    transform: trim
+
+  - name: Fare
+    type: DOUBLE
+
+  - name: Cabin
+    type: VARCHAR
+    transform: trim
+    # Will be NULL for missing values
+
+  - name: Embarked
+    type: VARCHAR
+    transform: upper  # Normalize to uppercase (S, C, Q)
+
+# Data quality filters
+filters:
+  # Ensure valid survival values (0 or 1)
+  - column: Survived
+    operator: in
+    value: [0, 1]
+
+  # Ensure valid passenger class
+  - column: Pclass
+    operator: in
+    value: [1, 2, 3]
+
+  # Ensure valid sex
+  - column: Sex
+    operator: in
+    value: ["male", "female"]
+
+  # Ensure fare is non-negative (when present)
+  - column: Fare
+    operator: ">="
+    value: 0
+
+  # Ensure valid embarkation port (when present)
+  # Note: Some rows may have NULL Embarked, filter handles that
+  - column: Embarked
+    operator: in
+    value: ["S", "C", "Q"]
+    allow_null: true
+
+# Order by passenger ID
+order_by: [PassengerId]
