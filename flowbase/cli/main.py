@@ -280,10 +280,6 @@ def features_compile(config_file: str, dataset: str, output: str, preview: bool)
         with open(config_file, 'r') as f:
             config = yaml.safe_load(f)
 
-        # Handle wrapped config
-        if 'features' in config:
-            config = config['features']
-
         console.print(f"[blue]Compiling features:[/blue] {config['name']}")
 
         # Determine source table
@@ -364,10 +360,6 @@ def model_train(config_file: str, features: str, output: str) -> None:
         # Load config
         with open(config_file, 'r') as f:
             config = yaml.safe_load(f)
-
-        # Handle wrapped config
-        if 'model' in config:
-            config = config['model']
 
         console.print(f"[blue]Training model:[/blue] {config['name']}")
 
