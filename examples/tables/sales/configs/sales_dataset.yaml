@@ -1,0 +1,33 @@
+name: sales
+description: Clean sales data with proper types
+
+columns:
+  - name: date
+    type: DATE
+
+  - name: product_id
+    type: VARCHAR
+    transform: trim
+
+  - name: quantity
+    type: INTEGER
+
+  - name: price
+    type: DOUBLE
+
+  - name: customer_id
+    type: VARCHAR
+    transform: trim
+
+  - name: region
+    type: VARCHAR
+    transform: upper
+
+filters:
+  - column: quantity
+    operator: ">"
+    value: 0
+
+  - column: price
+    operator: ">"
+    value: 0

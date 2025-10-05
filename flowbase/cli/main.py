@@ -552,6 +552,220 @@ def experiment_list(experiment: str = None) -> None:
     tracker.close()
 
 
+@cli.group()
+def table() -> None:
+    """Manage tables (incremental loading and compaction)."""
+    pass
+
+
+@table.command("create")
+@click.argument("config_file")
+def table_create(config_file: str) -> None:
+    """Create a new table from config."""
+    from flowbase.tables.manager import TableManager
+
+    try:
+        manager = TableManager()
+        result = manager.create_table(config_file)
+
+        console.print(f"[green]✓[/green] Table created: {result['table_name']}")
+        console.print(f"[dim]Base path:[/dim] {result['base_path']}")
+
+        manager.close()
+    except Exception as e:
+        console.print(f"[red]✗[/red] Failed to create table: {e}")
+        sys.exit(1)
+
+
+@table.command("ingest")
+@click.argument("config_file")
+@click.argument("source_file")
+@click.option("--date", required=True, help="Date for this data (YYYY-MM-DD)")
+@click.option("--dataset-config", help="Optional dataset cleaning config")
+def table_ingest(config_file: str, source_file: str, date: str, dataset_config: str) -> None:
+    """Ingest data for a specific date."""
+    from flowbase.tables.manager import TableManager
+    import yaml
+
+    try:
+        with open(config_file, 'r') as f:
+            config = yaml.safe_load(f)
+        table_name = config["name"]
+
+        manager = TableManager()
+
+        with console.status(f"[bold blue]Ingesting data for {date}..."):
+            result = manager.ingest(
+                table_name=table_name,
+                config_path=config_file,
+                source_file=source_file,
+                date=date,
+                dataset_config_path=dataset_config
+            )
+
+        console.print(f"[green]✓[/green] Ingested {result['rows']:,} rows")
+        console.print(f"[dim]Destination:[/dim] {result['destination']}")
+
+        manager.close()
+    except Exception as e:
+        console.print(f"[red]✗[/red] Ingestion failed: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+@table.command("compact")
+@click.argument("config_file")
+@click.option("--period", required=True, help="Period to compact (YYYY-MM)")
+@click.option("--delete-source", is_flag=True, help="Delete source files after compaction")
+def table_compact(config_file: str, period: str, delete_source: bool) -> None:
+    """Compact daily files into monthly files."""
+    from flowbase.tables.manager import TableManager
+    import yaml
+
+    try:
+        with open(config_file, 'r') as f:
+            config = yaml.safe_load(f)
+        table_name = config["name"]
+
+        manager = TableManager()
+
+        with console.status(f"[bold blue]Compacting {period}..."):
+            result = manager.compact(
+                table_name=table_name,
+                config_path=config_file,
+                period=period,
+                delete_source=delete_source
+            )
+
+        if result["status"] == "skipped":
+            console.print(f"[yellow]⊘[/yellow] {result['reason']}")
+        else:
+            console.print(f"[green]✓[/green] Compacted {result['source_files']} files ({result['rows']:,} rows)")
+            console.print(f"[dim]Output:[/dim] {result['output']}")
+            if delete_source:
+                console.print(f"[dim]Deleted {result['source_files']} source files[/dim]")
+
+        manager.close()
+    except Exception as e:
+        console.print(f"[red]✗[/red] Compaction failed: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+@table.command("status")
+@click.argument("config_file")
+def table_status(config_file: str) -> None:
+    """Show status of a table."""
+    from flowbase.tables.manager import TableManager
+    import yaml
+
+    try:
+        with open(config_file, 'r') as f:
+            config = yaml.safe_load(f)
+        table_name = config["name"]
+
+        manager = TableManager()
+        status = manager.get_status(table_name)
+
+        console.print(f"\n[bold]Table:[/bold] {status['table_name']}")
+        console.print(f"\n[bold]Ingestion:[/bold]")
+        console.print(f"  Total ingestions: {status['ingestion']['total_ingestions']}")
+        console.print(f"  Date range: {status['ingestion']['first_date']} → {status['ingestion']['last_date']}")
+        console.print(f"  Total rows: {status['ingestion']['total_rows']:,}")
+
+        console.print(f"\n[bold]Compaction:[/bold]")
+        console.print(f"  Total compactions: {status['compaction']['total_compactions']}")
+        if status['compaction']['total_compactions'] > 0:
+            console.print(f"  Compacted range: {status['compaction']['first_compacted_date']} → {status['compaction']['last_compacted_date']}")
+
+        manager.close()
+    except Exception as e:
+        console.print(f"[red]✗[/red] Failed to get status: {e}")
+        sys.exit(1)
+
+
+@table.command("query")
+@click.argument("config_file")
+@click.argument("sql")
+@click.option("--limit", type=int, help="Limit number of rows displayed")
+def table_query(config_file: str, sql: str, limit: int) -> None:
+    """Query a table using SQL."""
+    from flowbase.tables.manager import TableManager
+    import yaml
+
+    try:
+        with open(config_file, 'r') as f:
+            config = yaml.safe_load(f)
+        table_name = config["name"]
+
+        manager = TableManager()
+
+        with console.status("[bold blue]Executing query..."):
+            result = manager.query(table_name, config_file, sql)
+
+        console.print(f"\n[green]✓[/green] {len(result):,} rows returned\n")
+
+        if limit:
+            console.print(result.head(limit).to_string())
+        else:
+            console.print(result.to_string())
+
+        manager.close()
+    except Exception as e:
+        console.print(f"[red]✗[/red] Query failed: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+@cli.group()
+def scraper() -> None:
+    """Manage scrapers (scheduled data collection)."""
+    pass
+
+
+@scraper.command("run")
+@click.argument("config_file")
+@click.option("--date", help="Date to scrape (YYYY-MM-DD), defaults to today")
+def scraper_run(config_file: str, date: str) -> None:
+    """Run a scraper and ingest results."""
+    from flowbase.scrapers.runner import ScraperRunner
+
+    try:
+        runner = ScraperRunner()
+        runner.run(config_file, date=date)
+    except Exception as e:
+        console.print(f"[red]✗[/red] Scraper failed: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+@scraper.command("list")
+@click.option("--dir", default="scrapers", help="Directory containing scraper configs")
+def scraper_list(dir: str) -> None:
+    """List all available scrapers."""
+    from flowbase.scrapers.runner import ScraperRunner
+
+    try:
+        runner = ScraperRunner()
+        scrapers = runner.list_scrapers(dir)
+
+        if not scrapers:
+            console.print(f"[yellow]No scrapers found in {dir}/[/yellow]")
+            return
+
+        console.print(f"\n[bold]Available scrapers:[/bold]")
+        for scraper in scrapers:
+            console.print(f"  • {scraper}")
+
+    except Exception as e:
+        console.print(f"[red]✗[/red] Failed to list scrapers: {e}")
+        sys.exit(1)
+
+
 @cli.command()
 @click.option("--port", default=8501, help="Port to run the UI on")
 @click.option("--mode", default="ide", type=click.Choice(["ide", "ml", "explore", "features"]), help="UI mode")

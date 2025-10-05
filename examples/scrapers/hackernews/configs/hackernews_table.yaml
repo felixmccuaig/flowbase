@@ -1,0 +1,24 @@
+name: hackernews_stories
+description: Daily Hacker News top stories with auto-compaction
+
+storage:
+  type: local
+  base_path: data/tables/hackernews/
+  format: parquet
+
+partitioning:
+  strategy: flat
+  pattern: "{date}.parquet"
+  date_format: "%Y-%m-%d"
+
+compaction:
+  enabled: true
+  trigger:
+    type: manual
+    schedule: "0 2 1 * *"  # Monthly at 2 AM on the 1st
+    delay_days: 3
+  strategy:
+    type: monthly
+    output_pattern: "{year}-{month}.parquet"
+    delete_source: false
+    lookback_months: 1

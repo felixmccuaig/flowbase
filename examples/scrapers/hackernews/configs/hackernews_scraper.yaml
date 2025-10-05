@@ -1,0 +1,14 @@
+name: hackernews
+description: Scrapes top 100 stories from Hacker News
+
+scraper:
+  function: examples/scrapers/hackernews/scraper.py:fetch_data_for_day
+  parameters: {}
+
+output:
+  table: hackernews_stories
+  table_config: examples/scrapers/hackernews/configs/hackernews_table.yaml
+
+schedule:
+  cron: "0 */6 * * *"  # Every 6 hours
+  timezone: "UTC"

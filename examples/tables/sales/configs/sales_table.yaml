@@ -1,0 +1,39 @@
+name: sales
+description: Daily sales transactions table with auto-compaction
+
+# Where data lives
+storage:
+  type: local
+  base_path: data/tables/sales/
+  format: parquet
+
+# How data is partitioned
+partitioning:
+  strategy: flat  # Flat file structure
+  pattern: "{date}.parquet"  # e.g., 2024-01-15.parquet
+  date_format: "%Y-%m-%d"
+
+# Compaction rules
+compaction:
+  enabled: true
+
+  # When to compact
+  trigger:
+    type: manual  # Can be: manual, schedule
+    schedule: "0 3 1 * *"  # 3 AM on 1st of month (if schedule type)
+    delay_days: 7  # Wait 7 days after month ends before compacting
+
+  # How to compact
+  strategy:
+    type: monthly  # Roll up daily files into monthly files
+    output_pattern: "{year}-{month}.parquet"  # e.g., 2024-01.parquet
+
+    # Keep originals or delete after compaction?
+    delete_source: false
+
+    # Only compact completed months
+    lookback_months: 1
+
+# Optional: Dataset cleaning config to apply during ingestion
+ingestion:
+  dataset_config: examples/tables/sales/configs/sales_dataset.yaml
