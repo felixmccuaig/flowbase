@@ -432,6 +432,83 @@ def model_predict(model_name: str, input_json: str, models_dir: str) -> None:
         sys.exit(1)
 
 
+@model.command("predict-from-features")
+@click.argument("model_name")
+@click.option("--features", "-f", required=True, help="Feature parquet file or table name")
+@click.option("--where", "-w", help="SQL WHERE clause to select row(s)")
+@click.option("--select", "-s", help="SQL SELECT clause for identifier columns (e.g., 'event_id, competitor_id')")
+@click.option("--models-dir", "-d", default="data/models", help="Directory containing models")
+def model_predict_from_features(model_name: str, features: str, where: str, select: str, models_dir: str) -> None:
+    """Make predictions by querying feature table/view.
+
+    Examples:
+      # Predict for specific race and competitor
+      flowbase model predict-from-features xgboost_base \\
+        -f data/features/greyhound_features.parquet \\
+        -w "event_id = '12345' AND competitor_id = '678'" \\
+        -s "event_id, competitor_id, competitor_name"
+
+      # Predict for all competitors in a race
+      flowbase model predict-from-features xgboost_base \\
+        -f data/features/greyhound_features.parquet \\
+        -w "event_id = '12345'" \\
+        -s "event_id, competitor_id, competitor_name, box"
+    """
+    from flowbase.models.trainer import ModelTrainer
+    from pathlib import Path
+
+    try:
+        if not where:
+            console.print("[red]✗[/red] --where clause is required to select row(s) from features")
+            sys.exit(1)
+
+        console.print(f"[blue]Making prediction with:[/blue] {model_name}\n")
+
+        # Make prediction
+        trainer = ModelTrainer(models_dir=models_dir)
+        results = trainer.predict_from_query(
+            model_name=model_name,
+            feature_path=features,
+            where_clause=where,
+            select_columns=select
+        )
+
+        if not results:
+            console.print("[yellow]No rows matched the WHERE clause[/yellow]")
+            return
+
+        console.print(f"[green]✓[/green] Prediction complete for {len(results)} row(s)\n")
+
+        # Display results
+        for i, result in enumerate(results, 1):
+            if len(results) > 1:
+                console.print(f"[bold]Row {i}:[/bold]")
+
+            # Show identifier columns if provided
+            if select and "identifiers" in result:
+                console.print("[dim]Identifiers:[/dim]")
+                for key, value in result["identifiers"].items():
+                    console.print(f"  {key}: {value}")
+                console.print()
+
+            console.print(f"[bold]Prediction:[/bold] {result['prediction']}")
+
+            # Show probabilities if available
+            if "probabilities" in result:
+                console.print("\n[bold]Class Probabilities:[/bold]")
+                for cls, prob in result["probabilities"].items():
+                    console.print(f"  Class {cls}: {prob:.4f} ({prob*100:.2f}%)")
+
+            if i < len(results):
+                console.print("\n" + "-" * 50 + "\n")
+
+    except Exception as e:
+        console.print(f"[red]✗[/red] Prediction failed: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
 @cli.group()
 def eval() -> None:
     """Manage model evaluations."""

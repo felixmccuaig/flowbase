@@ -314,3 +314,93 @@ class ModelTrainer:
             }
 
         return result
+
+    def predict_from_query(
+        self,
+        model_name: str,
+        feature_path: str,
+        where_clause: str,
+        select_columns: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Make predictions by querying a feature table/parquet file.
+
+        Args:
+            model_name: Name of the model to use
+            feature_path: Path to feature parquet file or table name
+            where_clause: SQL WHERE clause to filter rows
+            select_columns: Optional comma-separated list of identifier columns to include in output
+
+        Returns:
+            List of dictionaries with prediction results for each row
+        """
+        from flowbase.query.engines.duckdb_engine import DuckDBEngine
+
+        # Load model and metadata
+        model, metadata = self.load_model(model_name)
+        expected_features = metadata["features"]
+
+        # Build SQL query to fetch rows
+        select_clause = ", ".join(expected_features)
+        if select_columns:
+            select_clause = f"{select_columns}, {select_clause}"
+
+        sql = f"""
+        SELECT {select_clause}
+        FROM read_parquet('{feature_path}')
+        WHERE {where_clause}
+        """
+
+        # Execute query
+        engine = DuckDBEngine()
+        result_df = engine.execute(sql)
+
+        if result_df.empty:
+            return []
+
+        # Extract identifier columns if provided
+        identifier_cols = []
+        if select_columns:
+            identifier_cols = [col.strip() for col in select_columns.split(",")]
+
+        # Make predictions for each row
+        results = []
+        for _, row in result_df.iterrows():
+            # Extract feature values
+            feature_values = {feat: row[feat] for feat in expected_features}
+
+            # Create DataFrame with correct feature order
+            input_df = pd.DataFrame([feature_values])[expected_features]
+
+            # Handle missing values same way as training
+            for col in input_df.columns:
+                if input_df[col].dtype in ['float64', 'int64']:
+                    if pd.isna(input_df[col].iloc[0]):
+                        input_df[col] = 0  # Default to 0 for inference
+                else:
+                    if pd.isna(input_df[col].iloc[0]):
+                        input_df[col] = 0
+
+            # Make prediction
+            prediction = model.predict(input_df)[0]
+
+            # Build result
+            result = {
+                "prediction": float(prediction) if isinstance(prediction, (int, float)) else str(prediction),
+                "model": model_name
+            }
+
+            # Add identifier columns
+            if identifier_cols:
+                result["identifiers"] = {col: row[col] for col in identifier_cols}
+
+            # Add probabilities for classifiers
+            if hasattr(model, "predict_proba"):
+                probabilities = model.predict_proba(input_df)[0]
+                classes = model.classes_ if hasattr(model, "classes_") else list(range(len(probabilities)))
+                result["probabilities"] = {
+                    str(cls): float(prob) for cls, prob in zip(classes, probabilities)
+                }
+
+            results.append(result)
+
+        return results
