@@ -78,7 +78,13 @@ class TableManager:
         # Build destination path
         base_path = Path(config["storage"]["base_path"])
         pattern = config["partitioning"]["pattern"]
-        dest_file = base_path / pattern.format(date=date)
+
+        # Format date according to date_format if specified
+        date_format = config["partitioning"].get("date_format", "%Y-%m-%d")
+        date_obj = datetime.strptime(date, "%Y-%m-%d")
+        formatted_date = date_obj.strftime(date_format)
+
+        dest_file = base_path / pattern.format(date=formatted_date)
         dest_file.parent.mkdir(parents=True, exist_ok=True)
 
         try:
