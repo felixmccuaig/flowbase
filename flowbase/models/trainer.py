@@ -131,7 +131,7 @@ class ModelTrainer:
         y_pred = model.predict(X_test)
 
         # Calculate additional metrics
-        from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, mean_squared_error, mean_absolute_error, r2_score
+        from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, mean_squared_error, mean_absolute_error, r2_score, confusion_matrix
 
         # Determine if classification or regression
         # Check if it's a regressor first (more reliable than checking unique values)
@@ -146,6 +146,7 @@ class ModelTrainer:
             "test_score": float(test_score)
         }
 
+        confusion_mat = None
         if is_regression:
             # Regression metrics
             mse = mean_squared_error(y_test, y_pred)
@@ -166,6 +167,9 @@ class ModelTrainer:
                 "f1": float(f1_score(y_test, y_pred, average=avg_method, zero_division=0))
             })
 
+            # Generate confusion matrix
+            confusion_mat = confusion_matrix(y_test, y_pred).tolist()
+
         # Save model
         model_name = config["name"]
         model_path = self.models_dir / f"{model_name}.pkl"
@@ -185,6 +189,41 @@ class ModelTrainer:
             "train_size": len(X_train),
             "test_size": len(X_test)
         }
+
+        # Add confusion matrix for classification models
+        if confusion_mat is not None:
+            # Get class labels if available
+            if hasattr(model, "classes_"):
+                classes = model.classes_.tolist()
+            else:
+                classes = sorted(set(y_test.tolist()))
+
+            metadata["confusion_matrix"] = {
+                "matrix": confusion_mat,
+                "labels": classes
+            }
+
+        # Add feature importance if available
+        if hasattr(model, "feature_importances_"):
+            # Tree-based models (Random Forest, XGBoost, LightGBM, etc.)
+            importances = model.feature_importances_.tolist()
+            metadata["feature_importance"] = [
+                {"feature": feat, "importance": float(imp)}
+                for feat, imp in zip(features, importances)
+            ]
+        elif hasattr(model, "coef_"):
+            # Linear models (Logistic Regression, Linear Regression, etc.)
+            if len(model.coef_.shape) == 1:
+                # Binary classification or regression
+                coefs = model.coef_.tolist()
+            else:
+                # Multi-class classification - use absolute mean across classes
+                coefs = [abs(model.coef_[:, i]).mean() for i in range(model.coef_.shape[1])]
+
+            metadata["feature_importance"] = [
+                {"feature": feat, "importance": float(abs(coef))}
+                for feat, coef in zip(features, coefs)
+            ]
 
         metadata_path = self.models_dir / f"{model_name}_metadata.json"
         with open(metadata_path, "w") as f:
