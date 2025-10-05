@@ -557,6 +557,92 @@ Built-in evaluation with proper metrics:
 
 Results saved to JSON for further analysis.
 
+### 5. Model Inference
+
+Once trained, use your models for predictions on new data:
+
+**Example: Iris Classification**
+```bash
+# Predict iris species from measurements
+flowbase model predict iris_simple \
+  --input '{"sepal length (cm)": 5.1, "sepal width (cm)": 3.5, "petal length (cm)": 1.4, "petal width (cm)": 0.2}'
+```
+
+Output:
+```
+Making prediction with: iris_simple
+
+Input features:
+  sepal length (cm): 5.1
+  sepal width (cm): 3.5
+  petal length (cm): 1.4
+  petal width (cm): 0.2
+
+✓ Prediction complete
+
+Prediction: 0
+
+Class Probabilities:
+  Class 0: 0.9766 (97.66%)  ← setosa
+  Class 1: 0.0234 (2.34%)   ← versicolor
+  Class 2: 0.0000 (0.00%)   ← virginica
+```
+
+**Example: Titanic Survival**
+```bash
+# Predict passenger survival
+flowbase model predict titanic_simple \
+  --input '{"pclass": 3, "is_male": 1, "age": 22, "sibsp": 1, "parch": 0, "fare": 7.25}'
+```
+
+Output:
+```
+Prediction: 0
+
+Class Probabilities:
+  Class 0: 0.8800 (88.00%)  ← died
+  Class 1: 0.1200 (12.00%)  ← survived
+```
+
+**Example: Housing Price**
+```bash
+# Predict median house value (in $100k)
+flowbase model predict housing_simple \
+  --input '{"MedInc": 8.3, "HouseAge": 41, "AveRooms": 6.98, "AveBedrms": 1.02, "Population": 322, "AveOccup": 2.55, "Latitude": 37.88, "Longitude": -122.23}'
+```
+
+Output:
+```
+Prediction: 4.242422900000001
+
+# This means ~$424k median house value
+```
+
+**Input from JSON File**
+
+For complex inputs, use a JSON file:
+
+```json
+// input.json
+{
+  "sepal length (cm)": 5.1,
+  "sepal width (cm)": 3.5,
+  "petal length (cm)": 1.4,
+  "petal width (cm)": 0.2
+}
+```
+
+```bash
+flowbase model predict iris_simple --input input.json
+```
+
+**Key Features**:
+- ✅ **Automatic validation**: Checks for missing required features
+- ✅ **Correct ordering**: Ensures features are passed in the right order
+- ✅ **Probability scores**: Shows class probabilities for classifiers
+- ✅ **Type handling**: Automatically handles type conversions
+- ✅ **Model metadata**: Uses saved feature names and preprocessing
+
 ## CLI Commands
 
 ```bash
@@ -568,6 +654,9 @@ flowbase features compile <config.yaml> --dataset <dataset.parquet> [--output <p
 
 # Model training
 flowbase model train <config.yaml> --features <features.parquet> [--output <models-dir>]
+
+# Model prediction/inference
+flowbase model predict <model_name> --input <json-input> [--models-dir <dir>]
 
 # Model evaluation
 flowbase eval compare <model1.pkl> <model2.pkl> ... --name <eval-name>
