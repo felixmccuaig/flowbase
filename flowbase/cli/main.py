@@ -3,6 +3,7 @@
 import logging
 import sys
 from pathlib import Path
+from typing import Any, Dict, List
 
 import click
 from rich.console import Console
@@ -13,6 +14,7 @@ from flowbase.core.config.loader import load_config, load_pipeline_config, load_
 from flowbase.pipelines.executor import PipelineExecutor
 from flowbase.experiments.runner import ExperimentRunner
 from flowbase.experiments.tracker import ExperimentTracker
+from flowbase.inference.runner import InferenceRunner
 
 # Setup logging
 logging.basicConfig(
@@ -22,6 +24,46 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 console = Console()
+
+
+def _store_dynamic_param(params: Dict[str, Any], key: str, value: Any) -> None:
+    key = key.strip().lstrip("-")
+    if not key:
+        return
+
+    existing = params.get(key)
+    if existing is None:
+        params[key] = value
+    else:
+        if not isinstance(existing, list):
+            params[key] = [existing, value]
+        else:
+            existing.append(value)
+
+
+def _parse_dynamic_params(args: List[str]) -> Dict[str, Any]:
+    """Parse additional CLI parameters of the form --key value or --key=value."""
+    params: Dict[str, Any] = {}
+    idx = 0
+    while idx < len(args):
+        token = args[idx]
+        if token.startswith("--"):
+            stripped = token[2:]
+            if "=" in stripped:
+                key, value = stripped.split("=", 1)
+                _store_dynamic_param(params, key, value)
+            else:
+                # Look ahead for a value; treat as boolean flag if none found
+                if idx + 1 < len(args) and not args[idx + 1].startswith("--"):
+                    _store_dynamic_param(params, stripped, args[idx + 1])
+                    idx += 1
+                else:
+                    _store_dynamic_param(params, stripped, True)
+        elif "=" in token:
+            key, value = token.split("=", 1)
+            _store_dynamic_param(params, key, value)
+        idx += 1
+    return params
 
 
 @click.group()
@@ -890,6 +932,94 @@ def table_query(config_file: str, sql: str, limit: int) -> None:
         console.print(f"[red]✗[/red] Query failed: {e}")
         import traceback
         traceback.print_exc()
+        sys.exit(1)
+
+
+@cli.group()
+def infer() -> None:
+    """Run trained models for inference."""
+    pass
+
+
+@infer.command("run", context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
+@click.argument("model_name")
+@click.option("--config", "config_path", help="Explicit path to inference config.")
+@click.option("--base-dir", default="inference", show_default=True, help="Base directory for inference configs.")
+@click.option("--preview", is_flag=True, help="Preview prediction rows in the console.")
+@click.option("--preview-limit", default=10, show_default=True, type=int, help="Rows to show when previewing.")
+@click.option("--skip-outputs", is_flag=True, help="Skip configured outputs (dry run).")
+@click.option("--where", "where_clause", help="Additional WHERE clause to append.")
+@click.pass_context
+def infer_run(
+    ctx: click.Context,
+    model_name: str,
+    config_path: str,
+    base_dir: str,
+    preview: bool,
+    preview_limit: int,
+    skip_outputs: bool,
+    where_clause: str,
+) -> None:
+    params = _parse_dynamic_params(list(ctx.args))
+    if where_clause:
+        params.setdefault("where", where_clause)
+
+    runner = InferenceRunner(base_dir=base_dir)
+
+    try:
+        summary = runner.run(
+            model_name=model_name,
+            params=params,
+            config_path=config_path,
+            skip_outputs=skip_outputs,
+        )
+
+        df = summary["dataframe"]
+        rows = len(df)
+        console.print(f"[green]✓[/green] Inference complete for {model_name}: {rows} row(s)")
+        console.print(f"[dim]Feature source:[/dim] {summary['feature_path']}")
+        console.print(f"[dim]WHERE:[/dim] {summary['where_clause']}")
+
+        if preview:
+            console.print()
+            if df.empty:
+                console.print("[yellow]No predictions generated[/yellow]")
+            else:
+                console.print(df.head(preview_limit).to_string(index=False))
+
+        outputs = summary.get("outputs") or {}
+        if outputs and not skip_outputs:
+            console.print("\n[bold]Outputs:[/bold]")
+            for key, value in outputs.items():
+                console.print(f"  {key}: {value}")
+        elif skip_outputs:
+            console.print("\n[dim]Configured outputs skipped[/dim]")
+
+    except Exception as e:
+        console.print(f"[red]✗[/red] Inference failed: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+@infer.command("list")
+@click.option("--base-dir", default="inference", show_default=True, help="Base directory for inference configs.")
+def infer_list(base_dir: str) -> None:
+    """List available inference configs."""
+    try:
+        runner = InferenceRunner(base_dir=base_dir)
+        configs = runner.list_configs()
+
+        if not configs:
+            console.print(f"[yellow]No inference configs found in {base_dir}/[/yellow]")
+            return
+
+        console.print("\n[bold]Available inference configs:[/bold]")
+        for path in configs:
+            console.print(f"  • {path}")
+
+    except Exception as e:
+        console.print(f"[red]✗[/red] Failed to list inference configs: {e}")
         sys.exit(1)
 
 

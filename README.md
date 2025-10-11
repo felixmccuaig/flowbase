@@ -643,6 +643,140 @@ flowbase model predict iris_simple --input input.json
 - ✅ **Type handling**: Automatically handles type conversions
 - ✅ **Model metadata**: Uses saved feature names and preprocessing
 
+### 6. Inference Jobs (Serverless-Ready)
+
+For production deployments, especially serverless environments (AWS Lambda, Cloud Functions), use **inference jobs** to coordinate:
+- Data scraping from APIs/sources
+- Feature generation from historical data
+- Batch predictions
+- Result storage in partitioned tables
+
+**Why Inference Jobs?**
+- 🚀 **Serverless-first**: Designed to run on Lambda without a data warehouse
+- 📊 **Historical data**: Access bulk storage (S3 partitioned tables) for features
+- 🔄 **Orchestration**: Coordinate scraping → features → inference → storage
+- 💰 **Cost-effective**: No expensive data warehouse needed
+
+**Project Structure**:
+```
+your-project/
+├── datasets/         # Data cleaning configs
+├── features/         # Feature engineering configs
+├── models/           # Model training configs
+├── scrapers/         # Data collection configs
+├── tables/           # Table/storage configs
+└── inference/        # 👈 Inference job configs
+    ├── daily_batch/
+    │   └── config.yaml
+    ├── real_time/
+    │   └── config.yaml
+    └── event_predict/
+        └── config.yaml
+```
+
+**Inference Config Example** (`examples/iris/configs/inference/iris_batch_daily/config.yaml`):
+
+```yaml
+name: iris_batch_daily
+description: Batch predictions for iris flowers
+version: 1.0
+
+# Just specify the model
+model: iris_logistic_regression
+
+# Feature path (TODO: auto-resolve from model → feature_set)
+feature_path: data/features/iris_features.parquet
+
+# Identifier columns to include in output
+select_columns:
+  - sepal_length
+  - petal_length
+  - species  # Ground truth for evaluation
+
+# Dynamic filters passed as CLI parameters (all optional)
+filters:
+  - param: species
+    column: species
+    operator: "="
+    type: string
+    required: false
+
+# Where to save predictions
+output:
+  file:
+    directory: ../../../data/predictions
+    filename: iris_predictions.parquet
+    format: parquet
+```
+
+**Running Inference Jobs**:
+
+```bash
+# Run predictions on all iris flowers
+flowbase infer run iris_batch_daily \
+  --config examples/iris/configs/inference/iris_batch_daily/config.yaml
+
+# Filter by species
+flowbase infer run iris_batch_daily \
+  --config examples/iris/configs/inference/iris_batch_daily/config.yaml \
+  --species "setosa"
+
+# Preview without saving
+flowbase infer run iris_batch_daily \
+  --config examples/iris/configs/inference/iris_batch_daily/config.yaml \
+  --species "setosa" \
+  --preview --skip-outputs
+
+# List available inference configs
+flowbase infer list --base-dir examples/iris/configs/inference
+```
+
+**Output**:
+```
+✓ Inference complete for iris_batch_daily: 50 row(s)
+Feature source: data/features/iris_features.parquet
+WHERE: species = 'setosa'
+
+Outputs:
+  file: /path/to/flowbase/data/predictions/iris_predictions.parquet
+```
+
+**Serverless Deployment Example**:
+
+The inference runner is designed to work in Lambda/Cloud Functions:
+
+```python
+# lambda_handler.py
+from flowbase.inference.runner import InferenceRunner
+
+def lambda_handler(event, context):
+    """
+    Triggered daily or by API Gateway
+    Event: {"date": "2025-10-11", "venue": "Sandown Park"}
+    """
+    runner = InferenceRunner(base_dir="s3://my-bucket/configs/inference")
+
+    result = runner.run(
+        model_name="daily_batch",
+        params=event,
+        skip_outputs=False
+    )
+
+    return {
+        "statusCode": 200,
+        "predictions": len(result["results"]),
+        "outputs": result["outputs"]
+    }
+```
+
+**Key Features**:
+- ✅ **Read from S3**: DuckDB can query S3 partitioned tables directly
+- ✅ **Dynamic filters**: Pass parameters via CLI or Lambda events
+- ✅ **Flexible outputs**: Save to files, tables, or both
+- ✅ **Date partitioning**: Automatic date-based table partitioning
+- ✅ **Dependencies**: Optionally scrape/generate features before inference
+- ✅ **No data warehouse**: Query parquet files directly from S3
+
 ## CLI Commands
 
 ```bash
@@ -655,8 +789,12 @@ flowbase features compile <config.yaml> --dataset <dataset.parquet> [--output <p
 # Model training
 flowbase model train <config.yaml> --features <features.parquet> [--output <models-dir>]
 
-# Model prediction/inference
+# Model prediction (single record)
 flowbase model predict <model_name> --input <json-input> [--models-dir <dir>]
+
+# Batch inference jobs (serverless-ready)
+flowbase infer run <job_name> [--param value] [--preview] [--skip-outputs]
+flowbase infer list [--base-dir <inference-configs-dir>]
 
 # Model evaluation
 flowbase eval compare <model1.pkl> <model2.pkl> ... --name <eval-name>
@@ -671,11 +809,17 @@ flowbase/
 │   ├── core/             # Configuration loading
 │   ├── pipelines/        # Dataset & feature compilers
 │   ├── models/           # Model training
+│   ├── inference/        # Inference runner for batch jobs
 │   ├── query/            # DuckDB query engine
 │   └── storage/          # Storage abstraction
 │
 ├── examples/
 │   ├── iris/             # Simple classification
+│   │   └── configs/
+│   │       ├── datasets/
+│   │       ├── features/
+│   │       ├── models/
+│   │       └── inference/  # Inference job configs
 │   ├── titanic/          # Messy data handling
 │   └── housing/          # Production-scale example
 │
@@ -683,6 +827,7 @@ flowbase/
     ├── datasets/         # Cleaned, typed data
     ├── features/         # Engineered features
     ├── models/           # Trained models
+    ├── predictions/      # Inference outputs
     └── evals/            # Evaluation results
 ```
 

@@ -1,0 +1,33 @@
+# Simple batch inference job
+# Runs predictions on iris flowers by species
+
+name: iris_batch_daily
+description: Batch predictions for iris flowers
+version: 1.0
+
+# Just specify the model
+model: iris_logistic_regression
+
+# Feature path (TODO: auto-resolve from model → feature_set)
+feature_path: data/features/iris_features.parquet
+
+# Identifier columns for output
+select_columns:
+  - sepal_length
+  - petal_length
+  - species  # Ground truth for evaluation
+
+# Filter for specific species (optional - runs on all if not specified)
+filters:
+  - param: species
+    column: species
+    operator: "="
+    type: string
+    required: false
+
+# Save predictions to file
+output:
+  file:
+    directory: ../../../data/predictions
+    filename: iris_predictions.parquet
+    format: parquet
