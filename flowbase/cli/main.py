@@ -467,15 +467,39 @@ def model_train(config_file: str, features: str, output: str) -> None:
     from pathlib import Path
 
     try:
-        # Load config
+        # Load model config
         with open(config_file, 'r') as f:
             config = yaml.safe_load(f)
 
         console.print(f"[blue]Training model:[/blue] {config['name']}")
 
+        # Find project root and load flowbase.yaml for S3 sync settings
+        project_root = Path.cwd()
+        flowbase_config_path = project_root / "flowbase.yaml"
+
+        s3_bucket = None
+        s3_prefix = ""
+
+        if flowbase_config_path.exists():
+            with open(flowbase_config_path, 'r') as f:
+                project_config = yaml.safe_load(f)
+
+            # Check if S3 sync is enabled
+            if project_config.get('sync_artifacts', False):
+                storage_config = project_config.get('storage', {})
+                if isinstance(storage_config, dict):
+                    s3_bucket = storage_config.get('bucket')
+                    s3_prefix = storage_config.get('prefix', '')
+                    if s3_bucket:
+                        console.print(f"[dim]S3 sync enabled:[/dim] s3://{s3_bucket}/{s3_prefix}")
+
         # Train
         models_dir = output or "data/models"
-        trainer = ModelTrainer(models_dir=models_dir)
+        trainer = ModelTrainer(
+            models_dir=models_dir,
+            s3_bucket=s3_bucket,
+            s3_prefix=s3_prefix
+        )
 
         with console.status("[bold blue]Training..."):
             result = trainer.train(config, features)
@@ -490,6 +514,9 @@ def model_train(config_file: str, features: str, output: str) -> None:
 
         console.print(f"\n[dim]Model saved to:[/dim] {result['model_path']}")
         console.print(f"[dim]Metadata saved to:[/dim] {result['metadata_path']}")
+
+        if result.get('s3_url'):
+            console.print(f"[green]✓[/green] Synced to S3")
 
     except Exception as e:
         console.print(f"[red]✗[/red] Training failed: {e}")
