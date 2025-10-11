@@ -571,6 +571,12 @@ class InferenceRunner:
                 resolved_dir = Path(self._resolve_path(directory, config_dir))
                 resolved_dir.mkdir(parents=True, exist_ok=True)
                 filename = file_cfg.get("filename") or f"predictions_{timestamp}.{fmt}"
+                # Replace template placeholders in filename with parameter values
+                try:
+                    filename = filename.format(**params)
+                except KeyError:
+                    # If placeholder not found in params, leave it as-is (don't fail)
+                    pass
                 destination_path = resolved_dir / filename
             else:
                 destination_path = Path(self._resolve_path(destination, config_dir))
