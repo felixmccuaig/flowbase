@@ -1,7 +1,30 @@
 """Main CLI entry point."""
 
-import logging
+# Filter blake2 errors from stderr BEFORE any imports
+# This must be first to catch hashlib initialization errors
 import sys
+import io
+
+class Blake2StderrFilter(io.TextIOWrapper):
+    """Filters blake2 hashlib errors from stderr."""
+    def __init__(self, original_stderr):
+        self._original_stderr = original_stderr
+
+    def write(self, s):
+        if 'blake2' not in s and 'unsupported hash type' not in s:
+            return self._original_stderr.write(s)
+        return len(s)
+
+    def flush(self):
+        return self._original_stderr.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._original_stderr, name)
+
+sys.stderr = Blake2StderrFilter(sys.stderr)
+
+import logging
+import warnings
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -16,12 +39,27 @@ from flowbase.experiments.runner import ExperimentRunner
 from flowbase.experiments.tracker import ExperimentTracker
 from flowbase.inference.runner import InferenceRunner
 
+# Suppress blake2b/blake2s hashlib errors (Python 3.12 + pyenv issue on macOS)
+# These are cosmetic - the hashes still work via hashlib.new('blake2b')
+class Blake2ErrorFilter(logging.Filter):
+    def filter(self, record):
+        message = record.getMessage()
+        return not ('blake2' in message or 'unsupported hash type' in message)
+
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(message)s",
     handlers=[RichHandler(rich_tracebacks=True)],
 )
+
+# Apply filter to root logger to suppress blake2 errors
+root_logger = logging.getLogger()
+root_logger.addFilter(Blake2ErrorFilter())
+
+# Suppress warnings about blake2
+warnings.filterwarnings('ignore', message='.*blake2.*')
+
 logger = logging.getLogger(__name__)
 console = Console()
 
