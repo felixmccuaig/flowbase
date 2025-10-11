@@ -88,11 +88,8 @@ class InferenceRunner:
         models_dir = config.get("models_dir", "data/models")
         trainer = ModelTrainer(models_dir=models_dir)
 
-        # TODO: Auto-resolve feature path from model → feature_set → dataset → tables
-        # For now, require explicit feature_path in config
-        feature_path = config.get("feature_path")
-        if not feature_path:
-            raise ValueError("Config must specify 'feature_path' (auto-resolution coming soon)")
+        # Auto-resolve feature path: model config → feature_set → data/features/{feature_set}.parquet
+        feature_path = self._resolve_feature_path_from_model(target_model, models_dir, config_dir)
 
         # Get select columns and filters from top level config
         select_columns = config.get("select_columns")
@@ -171,6 +168,60 @@ class InferenceRunner:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+    def _resolve_feature_path_from_model(
+        self,
+        model_name: str,
+        models_dir: str,
+        config_dir: Path
+    ) -> str:
+        """
+        Resolve feature path from model config.
+        Flow: model.yaml → feature_set → data/features/{feature_set}.parquet
+        """
+        # Find model config file
+        models_base = config_dir
+        # Walk up to find models directory
+        while models_base != models_base.parent:
+            model_config_path = models_base / "models" / f"{model_name}.yaml"
+            if model_config_path.exists():
+                break
+            models_base = models_base.parent
+        else:
+            # Try models_dir as absolute or relative
+            models_path = Path(models_dir)
+            if not models_path.is_absolute():
+                models_path = config_dir / models_path
+            model_config_path = models_path / f"{model_name}.yaml"
+
+        if not model_config_path.exists():
+            raise FileNotFoundError(
+                f"Model config not found: {model_config_path}. "
+                f"Searched from {config_dir} up to project root."
+            )
+
+        # Load model config to get feature_set
+        with model_config_path.open("r", encoding="utf-8") as f:
+            model_config = yaml.safe_load(f) or {}
+
+        feature_set = model_config.get("feature_set")
+        if not feature_set:
+            raise ValueError(
+                f"Model config {model_config_path} must specify 'feature_set'"
+            )
+
+        # Resolve to materialized features: data/features/{feature_set}.parquet
+        # Walk up to find data/features directory
+        features_base = model_config_path.parent
+        while features_base != features_base.parent:
+            feature_path = features_base.parent / "data" / "features" / f"{feature_set}.parquet"
+            if feature_path.exists():
+                return str(feature_path)
+            features_base = features_base.parent
+
+        # If not found, return expected path and let it fail later with clear error
+        expected_path = config_dir / "data" / "features" / f"{feature_set}.parquet"
+        return str(expected_path)
+
     def _discover_default_config(self, model_name: str) -> Path:
         base = self.base_dir / model_name
         for filename in self.DEFAULT_CONFIG_FILENAMES:

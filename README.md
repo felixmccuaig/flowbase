@@ -681,11 +681,8 @@ name: iris_batch_daily
 description: Batch predictions for iris flowers
 version: 1.0
 
-# Just specify the model
+# Just specify the model (features auto-resolved from model → feature_set → data/features/)
 model: iris_logistic_regression
-
-# Feature path (TODO: auto-resolve from model → feature_set)
-feature_path: data/features/iris_features.parquet
 
 # Identifier columns to include in output
 select_columns:
