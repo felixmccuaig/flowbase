@@ -595,10 +595,33 @@ class WorkflowRunner:
         # Convert feature config to dict for compiler
         feature_config_dict = self._feature_config_to_dict(feature_dep.config)
 
+        # Determine which compiler to use based on feature config format
+        # If features have 'type' field, use declarative compiler
+        # Otherwise use expression-based compiler
+        use_declarative = False
+        if feature_config_dict.get('features'):
+            first_feature = feature_config_dict['features'][0]
+            use_declarative = 'type' in first_feature
+
         # Compile features to SQL
-        self.logger.info(f"Compiling features with source table: {source_table}")
-        compiler = FeatureCompiler(source_table=source_table)
-        sql = compiler.compile(feature_config_dict)
+        if use_declarative:
+            from flowbase.pipelines.declarative_feature_compiler import DeclarativeFeatureCompiler
+            self.logger.info(f"Using declarative feature compiler with source table: {source_table}")
+
+            # Get entity_id and time columns from config, with sensible defaults
+            entity_id_column = feature_config_dict.get('entity_id_column', 'entity_id')
+            time_column = feature_config_dict.get('time_column', 'timestamp')
+
+            compiler = DeclarativeFeatureCompiler(
+                entity_id_column=entity_id_column,
+                time_column=time_column,
+                source_table=source_table
+            )
+            sql = compiler.compile(feature_config_dict)
+        else:
+            self.logger.info(f"Using expression-based compiler with source table: {source_table}")
+            compiler = FeatureCompiler(source_table=source_table)
+            sql = compiler.compile(feature_config_dict)
 
         self.logger.info(f"Generated SQL:\n{sql}")
 
@@ -694,15 +717,39 @@ class WorkflowRunner:
                 'table': config.source.table,
             }
 
+        # Add declarative feature engineering config if present
+        if hasattr(config, 'entity_id_column') and config.entity_id_column:
+            result['entity_id_column'] = config.entity_id_column
+        if hasattr(config, 'time_column') and config.time_column:
+            result['time_column'] = config.time_column
+
         if config.features:
-            result['features'] = [
-                {
-                    'name': f.name,
-                    'expression': f.expression,
-                    'description': f.description,
-                }
-                for f in config.features
-            ]
+            # Convert features, preserving all fields
+            result['features'] = []
+            for f in config.features:
+                feature_dict = {'name': f.name}
+
+                # Add all attributes from the feature object
+                if hasattr(f, 'type') and f.type:
+                    feature_dict['type'] = f.type
+                if hasattr(f, 'expression') and f.expression:
+                    feature_dict['expression'] = f.expression
+                if hasattr(f, 'description') and f.description:
+                    feature_dict['description'] = f.description
+                if hasattr(f, 'windows') and f.windows:
+                    feature_dict['windows'] = f.windows
+                if hasattr(f, 'partition_by') and f.partition_by:
+                    feature_dict['partition_by'] = f.partition_by
+                if hasattr(f, 'filter') and f.filter:
+                    feature_dict['filter'] = f.filter
+                if hasattr(f, 'value_column') and f.value_column:
+                    feature_dict['value_column'] = f.value_column
+                if hasattr(f, 'value_expression') and f.value_expression:
+                    feature_dict['value_expression'] = f.value_expression
+                if hasattr(f, 'lagged') and f.lagged is not None:
+                    feature_dict['lagged'] = f.lagged
+
+                result['features'].append(feature_dict)
 
         return result
 

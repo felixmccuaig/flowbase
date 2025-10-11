@@ -286,17 +286,33 @@ class FeatureSource:
 
 @dataclass
 class FeatureDefinition:
-    """Single feature definition."""
+    """Single feature definition (supports both expression-based and declarative)."""
     name: str
-    expression: str
+    expression: Optional[str] = None
     description: Optional[str] = None
+
+    # Declarative feature engineering fields
+    type: Optional[str] = None  # count, average, sum, max, min, stddev, etc.
+    windows: Optional[List[str]] = None  # all_time, last_5, last_3, etc.
+    partition_by: Optional[List[str]] = None  # Additional partition columns
+    filter: Optional[str] = None  # SQL filter expression
+    value_column: Optional[str] = None  # For diff_from_last
+    value_expression: Optional[str] = None  # For contextual features
+    lagged: Optional[bool] = None  # For lagged features
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> FeatureDefinition:
         return cls(
             name=data['name'],
-            expression=data['expression'],
-            description=data.get('description')
+            expression=data.get('expression'),
+            description=data.get('description'),
+            type=data.get('type'),
+            windows=data.get('windows'),
+            partition_by=data.get('partition_by'),
+            filter=data.get('filter'),
+            value_column=data.get('value_column'),
+            value_expression=data.get('value_expression'),
+            lagged=data.get('lagged')
         )
 
 
@@ -307,6 +323,9 @@ class FeatureConfig:
     description: Optional[str] = None
     source: Optional[FeatureSource] = None
     features: List[FeatureDefinition] = field(default_factory=list)
+    # Declarative feature engineering config
+    entity_id_column: Optional[str] = None
+    time_column: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> FeatureConfig:
@@ -324,7 +343,9 @@ class FeatureConfig:
             name=data['name'],
             description=data.get('description'),
             source=source,
-            features=features
+            features=features,
+            entity_id_column=data.get('entity_id_column'),
+            time_column=data.get('time_column')
         )
 
     @classmethod
