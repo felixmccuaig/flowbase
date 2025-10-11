@@ -556,7 +556,13 @@ class WorkflowRunner:
         # Extract date parameter
         date = params.get("date")
 
-        runner = ScraperRunner()
+        # Check for environment variable overrides for Lambda/cloud environments
+        import os
+        metadata_db = os.environ.get('FLOWBASE_METADATA_DB')
+        temp_dir = os.environ.get('FLOWBASE_TEMP_DIR', '/tmp/data/scrapers/.temp')
+        data_root = os.environ.get('FLOWBASE_DATA_ROOT')
+
+        runner = ScraperRunner(metadata_db=metadata_db, temp_dir=temp_dir, data_root=data_root)
         result = runner.run(config_path, date=date)
 
         # Sync ingested file to S3 if enabled
@@ -571,8 +577,13 @@ class WorkflowRunner:
             if destination.exists():
                 self.logger.info(f"Syncing scraped data to S3: {destination}")
                 # Construct S3 key based on the local path structure
-                # destination is like: data/tables/thegreyhoundrecorder/results_2025_10_11.parquet
-                relative_path = destination.relative_to(project_root)
+                # If using data_root (Lambda /tmp), strip it to get the original relative path
+                import os
+                data_root = os.environ.get('FLOWBASE_DATA_ROOT')
+                if data_root and destination.is_relative_to(Path(data_root)):
+                    relative_path = destination.relative_to(Path(data_root))
+                else:
+                    relative_path = destination.relative_to(project_root)
                 s3_key = str(relative_path)
                 if self.s3_sync.upload_file(destination, s3_key):
                     s3_url = f"s3://{self.s3_sync.bucket}/{self.s3_sync.prefix}/{s3_key}".replace("//", "/")

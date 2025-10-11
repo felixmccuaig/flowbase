@@ -14,14 +14,16 @@ from flowbase.query.engines.duckdb_engine import DuckDBEngine
 class TableManager:
     """Manages table operations: ingestion, compaction, querying."""
 
-    def __init__(self, metadata_db: str = "data/tables/.metadata.db"):
+    def __init__(self, metadata_db: str = "data/tables/.metadata.db", data_root: Optional[str] = None):
         """Initialize table manager.
 
         Args:
             metadata_db: Path to metadata database
+            data_root: Optional root directory to prepend to table paths (for Lambda /tmp support)
         """
         self.metadata = TableMetadata(metadata_db)
         self.engine = DuckDBEngine()
+        self.data_root = Path(data_root) if data_root else None
 
     def load_config(self, config_path: str) -> Dict[str, Any]:
         """Load table configuration from YAML.
@@ -43,10 +45,14 @@ class TableManager:
         """
         config = self.load_config(config_path)
         table_name = config["name"]
-        base_path = config["storage"]["base_path"]
+        base_path = Path(config["storage"]["base_path"])
+
+        # Prepend data_root if specified (for Lambda /tmp support)
+        if self.data_root:
+            base_path = self.data_root / base_path
 
         # Create base directory
-        Path(base_path).mkdir(parents=True, exist_ok=True)
+        base_path.mkdir(parents=True, exist_ok=True)
 
         # Register in metadata
         self.metadata.register_table(table_name, config_path, base_path)
@@ -77,6 +83,11 @@ class TableManager:
 
         # Build destination path
         base_path = Path(config["storage"]["base_path"])
+
+        # Prepend data_root if specified (for Lambda /tmp support)
+        if self.data_root:
+            base_path = self.data_root / base_path
+
         pattern = config["partitioning"]["pattern"]
 
         # Format date according to date_format if specified
@@ -202,6 +213,11 @@ class TableManager:
 
         # Build output path
         base_path = Path(config["storage"]["base_path"])
+
+        # Prepend data_root if specified (for Lambda /tmp support)
+        if self.data_root:
+            base_path = self.data_root / base_path
+
         compaction_config = config.get("compaction", {})
         strategy_config = compaction_config.get("strategy", {})
         output_pattern = strategy_config.get("output_pattern", "{year}-{month}.parquet")
@@ -264,7 +280,12 @@ class TableManager:
             Query results as DataFrame
         """
         config = self.load_config(config_path)
-        base_path = config["storage"]["base_path"]
+        base_path = Path(config["storage"]["base_path"])
+
+        # Prepend data_root if specified (for Lambda /tmp support)
+        if self.data_root:
+            base_path = self.data_root / base_path
+
         file_format = config["storage"].get("format", "parquet")
 
         # Register all files as a view

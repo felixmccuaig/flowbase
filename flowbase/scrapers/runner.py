@@ -15,15 +15,18 @@ from flowbase.tables.manager import TableManager
 class ScraperRunner:
     """Runs scrapers and ingests results into tables."""
 
-    def __init__(self, metadata_db: Optional[str] = None):
+    def __init__(self, metadata_db: Optional[str] = None, temp_dir: Optional[str] = None, data_root: Optional[str] = None):
         """Initialize scraper runner.
 
         Args:
             metadata_db: Path to metadata database (defaults to data/tables/.metadata.db)
+            temp_dir: Path for temporary files (defaults to data/scrapers/.temp)
+            data_root: Optional root directory to prepend to table paths (for Lambda /tmp support)
         """
         if metadata_db is None:
             metadata_db = "data/tables/.metadata.db"
-        self.table_manager = TableManager(metadata_db=metadata_db)
+        self.table_manager = TableManager(metadata_db=metadata_db, data_root=data_root)
+        self.temp_dir = Path(temp_dir) if temp_dir else Path("data/scrapers/.temp")
 
     def load_config(self, config_path: str) -> Dict[str, Any]:
         """Load scraper configuration from YAML."""
@@ -107,9 +110,8 @@ class ScraperRunner:
         table_config_path = output_config["table_config"]
 
         # Save to temporary parquet file
-        temp_dir = Path("data/scrapers/.temp")
-        temp_dir.mkdir(parents=True, exist_ok=True)
-        temp_file = temp_dir / f"{config['name']}_{scrape_date.strftime('%Y%m%d')}.parquet"
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
+        temp_file = self.temp_dir / f"{config['name']}_{scrape_date.strftime('%Y%m%d')}.parquet"
         result_df.to_parquet(temp_file, index=False)
 
         # Ingest into table
