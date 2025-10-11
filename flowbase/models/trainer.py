@@ -131,7 +131,7 @@ class ModelTrainer:
         y_pred = model.predict(X_test)
 
         # Calculate additional metrics
-        from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, mean_squared_error, mean_absolute_error, r2_score, confusion_matrix
+        from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, mean_squared_error, mean_absolute_error, r2_score, confusion_matrix, log_loss
 
         # Determine if classification or regression
         # Check if it's a regressor first (more reliable than checking unique values)
@@ -166,6 +166,11 @@ class ModelTrainer:
                 "recall": float(recall_score(y_test, y_pred, average=avg_method, zero_division=0)),
                 "f1": float(f1_score(y_test, y_pred, average=avg_method, zero_division=0))
             })
+
+            # Add log loss if model supports probability predictions
+            if hasattr(model, "predict_proba"):
+                y_pred_proba = model.predict_proba(X_test)
+                metrics["log_loss"] = float(log_loss(y_test, y_pred_proba))
 
             # Generate confusion matrix
             confusion_mat = confusion_matrix(y_test, y_pred).tolist()

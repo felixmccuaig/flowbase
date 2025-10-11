@@ -337,9 +337,33 @@ def features_compile(config_file: str, dataset: str, output: str, preview: bool)
         else:
             source_table = "raw_data"
 
+        # Determine which compiler to use based on feature config format
+        # If features have 'type' field, use declarative compiler
+        # Otherwise use expression-based compiler
+        use_declarative = False
+        if feature_config.get('features'):
+            first_feature = feature_config['features'][0]
+            use_declarative = 'type' in first_feature
+
         # Compile to SQL
-        compiler = FeatureCompiler(source_table=source_table)
-        sql = compiler.compile(feature_config)
+        if use_declarative:
+            from flowbase.pipelines.declarative_feature_compiler import DeclarativeFeatureCompiler
+            console.print("[dim]Using declarative feature compiler[/dim]")
+
+            # Get entity_id and time columns from config, with sensible defaults
+            entity_id_column = feature_config.get('entity_id_column', 'entity_id')
+            time_column = feature_config.get('time_column', 'timestamp')
+
+            compiler = DeclarativeFeatureCompiler(
+                entity_id_column=entity_id_column,
+                time_column=time_column,
+                source_table=source_table
+            )
+            sql = compiler.compile(feature_config)
+        else:
+            console.print("[dim]Using expression-based compiler[/dim]")
+            compiler = FeatureCompiler(source_table=source_table)
+            sql = compiler.compile(feature_config)
 
         console.print("[dim]Generated SQL:[/dim]")
         console.print(sql)
