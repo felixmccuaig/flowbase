@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional, Dict, Any
 
 from flowbase.core.config.schemas import SourceType
 
@@ -16,9 +16,19 @@ if TYPE_CHECKING:
 class TableLoader:
     """Loads tables into DuckDB from various sources."""
 
-    def __init__(self, engine: DuckDBEngine):
+    def __init__(self, engine: DuckDBEngine, project_config: Optional[Dict[str, Any]] = None):
         self.engine = engine
         self.logger = logging.getLogger(__name__)
+        self.project_config = project_config or {}
+
+        # Check if S3 sync is enabled from project config
+        self.s3_enabled = self.project_config.get('sync_artifacts', False)
+        storage_config = self.project_config.get('storage', {})
+        self.s3_bucket = storage_config.get('bucket') if isinstance(storage_config, dict) else None
+        self.s3_prefix = storage_config.get('prefix', '') if isinstance(storage_config, dict) else ''
+
+        if self.s3_enabled and self.s3_bucket:
+            self.logger.info(f"S3 sync enabled for tables: s3://{self.s3_bucket}/{self.s3_prefix}")
 
     def load_table(self, table: TableDependency) -> None:
         """
@@ -31,16 +41,68 @@ class TableLoader:
 
         config = table.config
 
-        # Determine source (S3 or local)
+        # Priority: 1) Explicit S3 source in table config, 2) Project-level S3 sync, 3) Local
         if config.source and config.source.type == SourceType.S3:
-            # S3 source
+            # Explicit S3 source in table config
             self._load_from_s3(table)
+        elif self.s3_enabled and self.s3_bucket:
+            # Project-level S3 sync enabled - auto-construct S3 path from storage.base_path
+            self._load_from_s3_auto(table)
         else:
             # Local source
             self._load_from_local(table)
 
+    def _load_from_s3_auto(self, table: TableDependency) -> None:
+        """Load table from S3 using auto-constructed path from project config."""
+        config = table.config
+        storage_config = config.storage_config
+
+        if not storage_config:
+            self.logger.error(f"No storage config found for table {table.name}")
+            return
+
+        # Auto-construct S3 path: s3://{bucket}/{prefix}/{storage.base_path}
+        base_path = storage_config.base_path
+        s3_prefix = f"{self.s3_prefix}/{base_path}".strip("/")
+
+        self.logger.info(f"Loading table {table.name} from S3: s3://{self.s3_bucket}/{s3_prefix}")
+
+        # Install and load httpfs extension for S3 support
+        try:
+            self.engine.execute("INSTALL httpfs;")
+            self.engine.execute("LOAD httpfs;")
+        except Exception as e:
+            self.logger.debug(f"httpfs extension already installed: {e}")
+
+        file_format = storage_config.file_format.value
+
+        # Construct S3 path pattern
+        s3_pattern = f"s3://{self.s3_bucket}/{s3_prefix}/*.{file_format}"
+
+        # Create view from S3 files
+        self.logger.info(f"Creating view '{table.name}' from {s3_pattern}")
+
+        if file_format == 'parquet':
+            read_func = f"read_parquet('{s3_pattern}')"
+        elif file_format == 'csv':
+            read_func = f"read_csv_auto('{s3_pattern}')"
+        else:
+            self.logger.error(f"Unsupported file format: {file_format}")
+            return
+
+        create_view_sql = f"CREATE OR REPLACE VIEW {table.name} AS SELECT * FROM {read_func}"
+
+        try:
+            self.engine.execute(create_view_sql)
+            self.logger.info(f"Successfully loaded table {table.name} from S3")
+        except Exception as e:
+            self.logger.error(f"Failed to load table {table.name} from S3: {e}")
+            # Try local fallback
+            self.logger.info(f"Attempting local fallback for table {table.name}")
+            self._load_from_local(table)
+
     def _load_from_s3(self, table: TableDependency) -> None:
-        """Load table from S3 using DuckDB's S3 support."""
+        """Load table from S3 using explicit S3 source config."""
         config = table.config
         bucket = config.source.bucket
         prefix = config.source.prefix

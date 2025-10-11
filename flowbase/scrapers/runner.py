@@ -64,13 +64,16 @@ class ScraperRunner:
 
         return getattr(module, function_name)
 
-    def run(self, config_path: str, date: Optional[str] = None, **kwargs) -> None:
+    def run(self, config_path: str, date: Optional[str] = None, **kwargs) -> Dict[str, Any]:
         """Run a scraper and ingest results.
 
         Args:
             config_path: Path to scraper YAML config
             date: Date to scrape (YYYY-MM-DD), defaults to today
             **kwargs: Additional parameters to pass to scraper function
+
+        Returns:
+            Dictionary with scraping results including row count and destination
         """
         config = self.load_config(config_path)
 
@@ -111,7 +114,7 @@ class ScraperRunner:
 
         # Ingest into table
         print(f"Ingesting into table: {output_config['table']}")
-        self.table_manager.ingest(
+        ingest_result = self.table_manager.ingest(
             table_name=output_config["table"],
             config_path=table_config_path,
             source_file=str(temp_file),
@@ -123,6 +126,13 @@ class ScraperRunner:
         temp_file.unlink()
 
         print("✓ Scraper completed successfully")
+
+        # Return results
+        return {
+            "rows": len(result_df),
+            "destination": ingest_result.get("destination"),
+            "date": scrape_date.strftime("%Y-%m-%d"),
+        }
 
     def list_scrapers(self, scrapers_dir: str = "scrapers") -> list:
         """List all available scraper configs.

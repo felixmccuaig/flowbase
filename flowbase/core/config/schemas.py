@@ -299,6 +299,7 @@ class FeatureDefinition:
     value_column: Optional[str] = None  # For diff_from_last
     value_expression: Optional[str] = None  # For contextual features
     lagged: Optional[bool] = None  # For lagged features
+    pass_num: Optional[int] = None  # For multi-pass feature compilation (renamed from 'pass' to avoid Python keyword)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> FeatureDefinition:
@@ -312,7 +313,8 @@ class FeatureDefinition:
             filter=data.get('filter'),
             value_column=data.get('value_column'),
             value_expression=data.get('value_expression'),
-            lagged=data.get('lagged')
+            lagged=data.get('lagged'),
+            pass_num=data.get('pass')  # Read from 'pass' in YAML, store as 'pass_num'
         )
 
 

@@ -68,10 +68,43 @@ class WorkflowRunner:
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.logger: Optional[logging.Logger] = None
         self.log_file: Optional[Path] = None
+        self.project_config: Optional[Dict[str, Any]] = None
+        self.s3_sync = None
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+    def _load_project_config(self, project_root: Path) -> None:
+        """Load project config (flowbase.yaml) and initialize S3 sync if enabled."""
+        flowbase_config_path = project_root / "flowbase.yaml"
+
+        if not flowbase_config_path.exists():
+            self.logger.debug("No flowbase.yaml found, S3 sync disabled")
+            return
+
+        try:
+            with open(flowbase_config_path, 'r') as f:
+                self.project_config = yaml.safe_load(f)
+
+            # Check if S3 sync is enabled
+            storage_config = self.project_config.get('storage', {})
+            sync_enabled = self.project_config.get('sync_artifacts', False)
+
+            if sync_enabled and isinstance(storage_config, dict):
+                s3_bucket = storage_config.get('bucket')
+                s3_prefix = storage_config.get('prefix', '')
+
+                if s3_bucket:
+                    try:
+                        from flowbase.storage.s3_sync import S3Sync
+                        self.s3_sync = S3Sync(bucket=s3_bucket, prefix=s3_prefix)
+                        self.logger.info(f"S3 sync enabled: s3://{s3_bucket}/{s3_prefix}")
+                    except ImportError:
+                        self.logger.warning("boto3 not installed. S3 sync disabled.")
+
+        except Exception as e:
+            self.logger.warning(f"Failed to load project config: {e}")
+
     def _setup_logging(self, workflow_name: str) -> None:
         """Set up logging for a workflow run."""
         timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
@@ -504,11 +537,48 @@ class WorkflowRunner:
         # Resolve config path relative to project root
         config_path = self._resolve_task_config_path(task.config, config_dir)
 
+        # Find project root and load config for S3 sync
+        search_dir = Path(config_path).parent.resolve()
+        project_root = None
+        while search_dir != search_dir.parent:
+            if (search_dir / "data").exists() or (search_dir / "models").exists():
+                project_root = search_dir
+                break
+            search_dir = search_dir.parent
+
+        if not project_root:
+            project_root = Path(config_path).parent.parent
+
+        # Load project config if not already loaded
+        if not self.project_config:
+            self._load_project_config(project_root)
+
         # Extract date parameter
         date = params.get("date")
 
         runner = ScraperRunner()
         result = runner.run(config_path, date=date)
+
+        # Sync ingested file to S3 if enabled
+        s3_url = None
+        if self.s3_sync and result and result.get("destination"):
+            destination_str = result["destination"]
+            # Convert to absolute path if it's relative
+            destination = Path(destination_str)
+            if not destination.is_absolute():
+                destination = project_root / destination
+
+            if destination.exists():
+                self.logger.info(f"Syncing scraped data to S3: {destination}")
+                # Construct S3 key based on the local path structure
+                # destination is like: data/tables/thegreyhoundrecorder/results_2025_10_11.parquet
+                relative_path = destination.relative_to(project_root)
+                s3_key = str(relative_path)
+                if self.s3_sync.upload_file(destination, s3_key):
+                    s3_url = f"s3://{self.s3_sync.bucket}/{self.s3_sync.prefix}/{s3_key}".replace("//", "/")
+                    self.logger.info(f"Scraped data synced to S3: {s3_url}")
+                else:
+                    self.logger.warning("Failed to sync scraped data to S3")
 
         return {
             "type": "scraper",
@@ -516,6 +586,7 @@ class WorkflowRunner:
             "date": date,
             "row_count": result.get("rows", 0) if result else 0,
             "destination": result.get("destination") if result else None,
+            "s3_url": s3_url,
         }
 
     def _run_features(
@@ -548,6 +619,9 @@ class WorkflowRunner:
         if not project_root:
             project_root = Path(config_path).parent.parent
 
+        # Load project config and initialize S3 sync if enabled
+        self._load_project_config(project_root)
+
         # Initialize DuckDB engine
         engine = DuckDBEngine()
 
@@ -575,7 +649,7 @@ class WorkflowRunner:
             # Load all tables into DuckDB
             if tables:
                 self.logger.info("Loading tables into DuckDB")
-                loader = TableLoader(engine)
+                loader = TableLoader(engine, project_config=self.project_config)
 
                 for table in tables:
                     try:
@@ -639,6 +713,17 @@ class WorkflowRunner:
 
             self.logger.info(f"Saved features to: {output_path}")
 
+            # Sync to S3 if enabled
+            s3_url = None
+            if self.s3_sync:
+                self.logger.info("Syncing features to S3...")
+                s3_key = f"data/features/{feature_name}.parquet"
+                if self.s3_sync.upload_file(output_path, s3_key):
+                    s3_url = f"s3://{self.s3_sync.bucket}/{self.s3_sync.prefix}/{s3_key}".replace("//", "/")
+                    self.logger.info(f"Features synced to S3: {s3_url}")
+                else:
+                    self.logger.warning("Failed to sync features to S3")
+
         finally:
             engine.close()
 
@@ -648,6 +733,7 @@ class WorkflowRunner:
             "feature_name": feature_name,
             "row_count": row_count,
             "output_path": str(output_path),
+            "s3_url": s3_url,
         }
 
     def _load_dataset_into_duckdb(
@@ -748,6 +834,8 @@ class WorkflowRunner:
                     feature_dict['value_expression'] = f.value_expression
                 if hasattr(f, 'lagged') and f.lagged is not None:
                     feature_dict['lagged'] = f.lagged
+                if hasattr(f, 'pass_num') and f.pass_num is not None:
+                    feature_dict['pass'] = f.pass_num  # Convert back to 'pass' for compiler
 
                 result['features'].append(feature_dict)
 
@@ -823,6 +911,22 @@ class WorkflowRunner:
         # Resolve config path relative to project root
         config_path = self._resolve_task_config_path(task.config, config_dir)
 
+        # Find project root and load config for S3 sync
+        search_dir = Path(config_path).parent.resolve()
+        project_root = None
+        while search_dir != search_dir.parent:
+            if (search_dir / "data").exists() or (search_dir / "models").exists():
+                project_root = search_dir
+                break
+            search_dir = search_dir.parent
+
+        if not project_root:
+            project_root = Path(config_path).parent.parent
+
+        # Load project config if not already loaded
+        if not self.project_config:
+            self._load_project_config(project_root)
+
         # Extract model name from config path or use task name
         model_name = Path(config_path).parent.name
 
@@ -834,11 +938,32 @@ class WorkflowRunner:
             skip_outputs=False,
         )
 
+        # Sync prediction outputs to S3 if enabled
+        s3_urls = []
+        if self.s3_sync and result and result.get("outputs"):
+            outputs = result.get("outputs", {})
+            # Look for parquet output files
+            for output_key, output_path in outputs.items():
+                if isinstance(output_path, str):
+                    output_file = Path(output_path)
+                    if output_file.exists() and output_file.suffix == '.parquet':
+                        self.logger.info(f"Syncing prediction output to S3: {output_file}")
+                        # Construct S3 key based on the local path structure
+                        relative_path = output_file.relative_to(project_root)
+                        s3_key = str(relative_path)
+                        if self.s3_sync.upload_file(output_file, s3_key):
+                            s3_url = f"s3://{self.s3_sync.bucket}/{self.s3_sync.prefix}/{s3_key}".replace("//", "/")
+                            s3_urls.append(s3_url)
+                            self.logger.info(f"Prediction output synced to S3: {s3_url}")
+                        else:
+                            self.logger.warning(f"Failed to sync prediction output to S3: {output_file}")
+
         return {
             "type": "inference",
             "model": result.get("model"),
             "row_count": len(result.get("results", [])),
             "outputs": result.get("outputs"),
+            "s3_urls": s3_urls if s3_urls else None,
         }
 
     def _run_custom(

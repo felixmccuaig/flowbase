@@ -1,6 +1,7 @@
 """Model training functionality."""
 
 import importlib
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import pickle
@@ -9,18 +10,40 @@ import json
 import pandas as pd
 from sklearn.model_selection import train_test_split
 
+logger = logging.getLogger(__name__)
+
 
 class ModelTrainer:
     """Handles model training from config."""
 
-    def __init__(self, models_dir: str = "data/models"):
+    def __init__(
+        self,
+        models_dir: str = "data/models",
+        s3_bucket: Optional[str] = None,
+        s3_prefix: Optional[str] = ""
+    ):
         """Initialize trainer.
 
         Args:
             models_dir: Directory to save trained models
+            s3_bucket: Optional S3 bucket for syncing artifacts
+            s3_prefix: Optional S3 prefix (e.g., "flowbase-greyhounds/")
         """
         self.models_dir = Path(models_dir)
         self.models_dir.mkdir(parents=True, exist_ok=True)
+
+        self.s3_bucket = s3_bucket
+        self.s3_prefix = s3_prefix
+        self.s3_sync = None
+
+        if s3_bucket:
+            try:
+                from flowbase.storage.s3_sync import S3Sync
+                self.s3_sync = S3Sync(bucket=s3_bucket, prefix=s3_prefix)
+                logger.info(f"S3 sync enabled: s3://{s3_bucket}/{s3_prefix}")
+            except ImportError:
+                logger.warning("boto3 not installed. S3 sync disabled.")
+                self.s3_sync = None
 
     def load_features(self, feature_path: str) -> pd.DataFrame:
         """Load features from parquet file."""
@@ -255,9 +278,25 @@ class ModelTrainer:
         with open(metadata_path, "w") as f:
             json.dump(metadata, f, indent=2)
 
+        # Sync to S3 if configured
+        s3_url = None
+        if self.s3_sync:
+            logger.info("Syncing model artifacts to S3...")
+            # Upload model file
+            model_s3_key = f"data/models/{model_name}.pkl"
+            self.s3_sync.upload_file(model_path, model_s3_key)
+
+            # Upload metadata file
+            metadata_s3_key = f"data/models/{model_name}_metadata.json"
+            s3_url = self.s3_sync.upload_file(metadata_path, metadata_s3_key)
+
+            if s3_url:
+                logger.info(f"Model synced to S3: s3://{self.s3_bucket}/{self.s3_prefix}/data/models/{model_name}")
+
         return {
             "model_path": str(model_path),
             "metadata_path": str(metadata_path),
+            "s3_url": s3_url if s3_url else None,
             "metrics": metrics,
             "train_size": len(X_train),
             "test_size": len(X_test)

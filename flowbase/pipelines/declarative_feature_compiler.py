@@ -38,7 +38,11 @@ class DeclarativeFeatureCompiler:
 
     def compile(self, config: Dict[str, Any]) -> str:
         """
-        Compile feature config to SQL.
+        Compile feature config to SQL with multi-pass support.
+
+        Features can have a 'pass' attribute (default: 1) to control compilation order.
+        This allows later passes to reference features computed in earlier passes,
+        avoiding nested window functions.
 
         Args:
             config: Feature configuration dict
@@ -48,7 +52,23 @@ class DeclarativeFeatureCompiler:
         """
         features = config.get("features", [])
 
-        # Build SELECT statement
+        # Group features by pass number
+        features_by_pass = {}
+        for feature_spec in features:
+            pass_num = feature_spec.get("pass", 1)
+            if pass_num not in features_by_pass:
+                features_by_pass[pass_num] = []
+            features_by_pass[pass_num].append(feature_spec)
+
+        # If only one pass, use simple SELECT (backward compatible)
+        if len(features_by_pass) == 1 and 1 in features_by_pass:
+            return self._compile_single_pass(features_by_pass[1])
+
+        # Multi-pass compilation using CTEs
+        return self._compile_multi_pass(features_by_pass)
+
+    def _compile_single_pass(self, features: List[Dict[str, Any]]) -> str:
+        """Compile features in a single SELECT statement."""
         select_parts = ["*"]  # Include all base columns
 
         for feature_spec in features:
@@ -56,10 +76,44 @@ class DeclarativeFeatureCompiler:
             if feature_sql:
                 select_parts.append(f"    {feature_sql}")
 
-        # Build final SQL
-        sql = f"SELECT\n{',\n'.join(select_parts)}\nFROM {self.source_table}"
+        return f"SELECT\n{',\n'.join(select_parts)}\nFROM {self.source_table}"
 
-        return sql
+    def _compile_multi_pass(self, features_by_pass: Dict[int, List[Dict[str, Any]]]) -> str:
+        """
+        Compile features with multiple passes using CTEs.
+
+        Each pass creates a CTE that the next pass can reference.
+        """
+        pass_numbers = sorted(features_by_pass.keys())
+        ctes = []
+        current_table = self.source_table
+
+        for i, pass_num in enumerate(pass_numbers):
+            features = features_by_pass[pass_num]
+            is_last_pass = (i == len(pass_numbers) - 1)
+
+            # Build SELECT for this pass
+            select_parts = ["*"]  # Include all columns from previous pass
+            for feature_spec in features:
+                feature_sql = self._compile_feature(feature_spec)
+                if feature_sql:
+                    select_parts.append(f"    {feature_sql}")
+
+            # Create CTE for this pass (except the last one)
+            if not is_last_pass:
+                cte_name = f"pass_{pass_num}_features"
+                cte_sql = f"{cte_name} AS (\n  SELECT\n  {',\n  '.join(select_parts)}\n  FROM {current_table}\n)"
+                ctes.append(cte_sql)
+                current_table = cte_name
+            else:
+                # Last pass becomes the main SELECT
+                final_select = f"SELECT\n{',\n'.join(select_parts)}\nFROM {current_table}"
+
+        # Combine CTEs and final SELECT
+        if ctes:
+            return f"WITH {',\n\n'.join(ctes)}\n\n{final_select}"
+        else:
+            return final_select
 
     def _compile_feature(self, spec: Dict[str, Any]) -> Optional[str]:
         """
