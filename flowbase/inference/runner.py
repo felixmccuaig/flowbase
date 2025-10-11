@@ -131,11 +131,13 @@ class InferenceRunner:
 
         outputs: Dict[str, Any] = {}
         if not skip_outputs and config.get("output"):
+            job_name = config.get("name", model_name)
             outputs = self._write_outputs(
                 df=dataframe,
                 output_cfg=config["output"],
                 config_dir=config_dir,
                 params=normalized_params,
+                job_name=job_name,
             )
 
         return {
@@ -552,6 +554,7 @@ class InferenceRunner:
         output_cfg: Dict[str, Any],
         config_dir: Path,
         params: Dict[str, Any],
+        job_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         info: Dict[str, Any] = {}
         if df.empty and output_cfg.get("skip_if_empty", True):
@@ -561,14 +564,37 @@ class InferenceRunner:
         if file_cfg:
             destination = file_cfg.get("path")
             directory = file_cfg.get("directory")
+
+            # Auto-derive directory from job name if not specified
             if not destination and not directory:
-                raise ValueError("output.file requires 'path' or 'directory'")
+                if not job_name:
+                    raise ValueError("output.file requires 'path' or 'directory', or job_name for auto-resolution")
+                # Find project root by walking up from config_dir to find data/ or models/
+                search_dir = config_dir.resolve()
+                project_root = None
+                while search_dir != search_dir.parent:
+                    if (search_dir / "data").exists() or (search_dir / "models").exists():
+                        project_root = search_dir
+                        break
+                    search_dir = search_dir.parent
+
+                if not project_root:
+                    project_root = config_dir.resolve()
+
+                directory = str(project_root / "data" / "predictions" / job_name)
 
             fmt = file_cfg.get("format", "parquet").lower()
             timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
 
             if directory and not destination:
-                resolved_dir = Path(self._resolve_path(directory, config_dir))
+                # Resolve directory (either from config or auto-derived)
+                if directory.startswith("/"):
+                    # Absolute path
+                    resolved_dir = Path(directory)
+                else:
+                    # Relative path from config_dir
+                    resolved_dir = Path(self._resolve_path(directory, config_dir))
+
                 resolved_dir.mkdir(parents=True, exist_ok=True)
                 filename = file_cfg.get("filename") or f"predictions_{timestamp}.{fmt}"
                 # Replace template placeholders in filename with parameter values
