@@ -55,14 +55,34 @@ class ModelTrainer:
             )
         elif method == "time":
             time_column = split_config.get("time_column")
+
+            if not time_column:
+                raise ValueError("time method requires time_column")
+
+            # Sort by time column first (oldest to newest)
+            df_sorted = df.sort_values(by=time_column)
+            X_sorted = df_sorted[features]
+            y_sorted = df_sorted[target]
+
+            # Handle missing values in sorted data
+            for col in X_sorted.columns:
+                if X_sorted[col].dtype in ['float64', 'int64']:
+                    X_sorted[col] = X_sorted[col].fillna(X_sorted[col].median())
+                else:
+                    X_sorted[col] = X_sorted[col].fillna(X_sorted[col].mode()[0] if not X_sorted[col].mode().empty else 0)
+
+            # Use cutoff if provided, otherwise use test_size
             cutoff = split_config.get("cutoff")
-
-            if not time_column or not cutoff:
-                raise ValueError("time method requires time_column and cutoff")
-
-            train_mask = df[time_column] < cutoff
-            X_train, X_test = X[train_mask], X[~train_mask]
-            y_train, y_test = y[train_mask], y[~train_mask]
+            if cutoff:
+                train_mask = df_sorted[time_column] < cutoff
+                X_train, X_test = X_sorted[train_mask], X_sorted[~train_mask]
+                y_train, y_test = y_sorted[train_mask], y_sorted[~train_mask]
+            else:
+                # Split by test_size (last N% as test set)
+                test_size = split_config.get("test_size", 0.2)
+                split_idx = int(len(df_sorted) * (1 - test_size))
+                X_train, X_test = X_sorted.iloc[:split_idx], X_sorted.iloc[split_idx:]
+                y_train, y_test = y_sorted.iloc[:split_idx], y_sorted.iloc[split_idx:]
         else:
             raise ValueError(f"Unknown split method: {method}")
 
@@ -110,7 +130,8 @@ class ModelTrainer:
         # Prepare data
         features = config["features"]
         target = config["target"]
-        split_config = config.get("split", {"method": "random", "test_size": 0.2})
+        # Support both "split" and "train_test_split" keys
+        split_config = config.get("train_test_split") or config.get("split", {"method": "random", "test_size": 0.2})
 
         X_train, X_test, y_train, y_test = self.prepare_data(
             df, features, target, split_config
