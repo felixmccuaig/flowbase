@@ -322,7 +322,13 @@ def features_compile(config_file: str, dataset: str, output: str, preview: bool)
         with open(config_file, 'r') as f:
             config = yaml.safe_load(f)
 
-        console.print(f"[blue]Compiling features:[/blue] {config['name']}")
+        # Handle wrapped or unwrapped config
+        if 'features' in config:
+            feature_config = config['features']
+        else:
+            feature_config = config
+
+        console.print(f"[blue]Compiling features:[/blue] {feature_config['name']}")
 
         # Determine source table
         dataset_ref = config.get("dataset")
@@ -333,7 +339,7 @@ def features_compile(config_file: str, dataset: str, output: str, preview: bool)
 
         # Compile to SQL
         compiler = FeatureCompiler(source_table=source_table)
-        sql = compiler.compile(config)
+        sql = compiler.compile(feature_config)
 
         console.print("[dim]Generated SQL:[/dim]")
         console.print(sql)
@@ -368,7 +374,7 @@ def features_compile(config_file: str, dataset: str, output: str, preview: bool)
             console.print(f"[green]✓[/green] Saved to {output}")
         else:
             # Default output location
-            output = f"data/features/{config['name']}.parquet"
+            output = f"data/features/{feature_config['name']}.parquet"
             Path(output).parent.mkdir(parents=True, exist_ok=True)
             result_df.to_parquet(output)
             console.print(f"[green]✓[/green] Saved to {output}")
