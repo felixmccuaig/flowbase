@@ -1024,6 +1024,133 @@ def infer_list(base_dir: str) -> None:
 
 
 @cli.group()
+def workflow() -> None:
+    """Manage workflows (orchestrated pipelines)."""
+    pass
+
+
+@workflow.command("run", context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
+@click.argument("workflow_name")
+@click.option("--config", "config_path", help="Explicit path to workflow config.")
+@click.option("--base-dir", default="workflows", show_default=True, help="Base directory for workflow configs.")
+@click.option("--dry-run", is_flag=True, help="Preview execution plan without running tasks.")
+@click.pass_context
+def workflow_run(
+    ctx: click.Context,
+    workflow_name: str,
+    config_path: str,
+    base_dir: str,
+    dry_run: bool,
+) -> None:
+    """Run a workflow."""
+    from flowbase.workflows.runner import WorkflowRunner
+    import json
+
+    params = _parse_dynamic_params(list(ctx.args))
+    runner = WorkflowRunner(base_dir=base_dir)
+
+    try:
+        result = runner.run(
+            workflow_name=workflow_name,
+            params=params,
+            config_path=config_path,
+            dry_run=dry_run,
+        )
+
+        if dry_run:
+            console.print(f"[bold blue]Workflow Plan:[/bold blue] {result['workflow']}")
+            console.print(f"[dim]Config:[/dim] {result['config_path']}\n")
+
+            console.print("[bold]Template Variables:[/bold]")
+            for key, value in result['template_vars'].items():
+                console.print(f"  {key}: {value}")
+
+            console.print(f"\n[bold]Execution Order:[/bold]")
+            for i, task_name in enumerate(result['execution_plan'], 1):
+                console.print(f"  {i}. {task_name}")
+
+            console.print(f"\n[dim]Run without --dry-run to execute[/dim]")
+        else:
+            console.print(f"[bold blue]Workflow:[/bold blue] {result['workflow']}\n")
+
+            # Display task results
+            table = Table(title="Task Results")
+            table.add_column("Task", style="cyan")
+            table.add_column("Status", style="magenta")
+            table.add_column("Duration", style="blue")
+            table.add_column("Output", style="dim")
+
+            for task_result in result['results']:
+                status_icon = {
+                    "success": "[green]✓[/green]",
+                    "failed": "[red]✗[/red]",
+                    "skipped": "[yellow]⊘[/yellow]",
+                }[task_result['status']]
+
+                duration = task_result.get('duration_seconds')
+                duration_str = f"{duration:.2f}s" if duration else "-"
+
+                output_summary = ""
+                if task_result.get('output'):
+                    output = task_result['output']
+                    if isinstance(output, dict):
+                        if 'row_count' in output:
+                            output_summary = f"{output['row_count']} rows"
+                        elif 'message' in output:
+                            output_summary = output['message']
+                    else:
+                        output_summary = str(output)[:50]
+
+                error_msg = task_result.get('error', '')
+                if error_msg:
+                    output_summary = f"[red]{error_msg[:50]}[/red]"
+
+                table.add_row(
+                    task_result['name'],
+                    status_icon,
+                    duration_str,
+                    output_summary
+                )
+
+            console.print(table)
+
+            if result['success']:
+                console.print(f"\n[green]✓[/green] Workflow completed successfully")
+            else:
+                console.print(f"\n[red]✗[/red] Workflow completed with errors")
+                sys.exit(1)
+
+    except Exception as e:
+        console.print(f"[red]✗[/red] Workflow failed: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+@workflow.command("list")
+@click.option("--base-dir", default="workflows", show_default=True, help="Base directory for workflow configs.")
+def workflow_list(base_dir: str) -> None:
+    """List available workflows."""
+    from flowbase.workflows.runner import WorkflowRunner
+
+    try:
+        runner = WorkflowRunner(base_dir=base_dir)
+        workflows = runner.list_workflows()
+
+        if not workflows:
+            console.print(f"[yellow]No workflows found in {base_dir}/[/yellow]")
+            return
+
+        console.print("\n[bold]Available workflows:[/bold]")
+        for path in workflows:
+            console.print(f"  • {path}")
+
+    except Exception as e:
+        console.print(f"[red]✗[/red] Failed to list workflows: {e}")
+        sys.exit(1)
+
+
+@cli.group()
 def scraper() -> None:
     """Manage scrapers (scheduled data collection)."""
     pass
