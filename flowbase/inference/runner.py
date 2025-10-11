@@ -129,6 +129,14 @@ class InferenceRunner:
             config=config,
         )
 
+        # Apply post-processing transformations if configured
+        if config.get("post_processing"):
+            dataframe = self._apply_post_processing(dataframe, config["post_processing"])
+
+        # Run validation checks if configured
+        if config.get("validation"):
+            self._validate_predictions(dataframe, config["validation"])
+
         outputs: Dict[str, Any] = {}
         if not skip_outputs and config.get("output"):
             job_name = config.get("name", model_name)
@@ -547,6 +555,234 @@ class InferenceRunner:
             if pd.isna(dt):
                 raise ValueError(f"Could not parse date value: {value}")
         return dt.strftime("%Y-%m-%d")
+
+    def _apply_post_processing(
+        self,
+        df: pd.DataFrame,
+        post_processing_cfg: List[Dict[str, Any]],
+    ) -> pd.DataFrame:
+        """
+        Apply SQL-based post-processing transformations to predictions.
+
+        Args:
+            df: DataFrame with predictions
+            post_processing_cfg: List of transformation configs with 'name' and 'expression'
+
+        Returns:
+            DataFrame with new columns added
+        """
+        if df.empty:
+            return df
+
+        # Use DuckDB to apply SQL transformations
+        try:
+            import duckdb
+        except ImportError:
+            raise ImportError("DuckDB is required for post-processing transformations")
+
+        conn = duckdb.connect(":memory:")
+        conn.register("predictions", df)
+
+        # First, create a CTE that casts prediction to DOUBLE if it exists
+        # This ensures all post-processing expressions can use numeric operations
+        if "prediction" in df.columns:
+            cast_columns = []
+            for col in df.columns:
+                if col == "prediction":
+                    cast_columns.append("CAST(prediction AS DOUBLE) AS prediction")
+                else:
+                    cast_columns.append(col)
+            base_sql = f"SELECT {', '.join(cast_columns)} FROM predictions"
+        else:
+            base_sql = "SELECT * FROM predictions"
+
+        # Build SQL with all transformations
+        select_parts = ["*"]  # Start with all columns from CTE
+
+        for transform in post_processing_cfg:
+            name = transform.get("name")
+            expression = transform.get("expression")
+
+            if not name or not expression:
+                raise ValueError("Each post_processing entry requires 'name' and 'expression'")
+
+            # Clean up expression (remove leading/trailing whitespace and newlines)
+            expression = expression.strip()
+
+            # Add the transformation as a new column
+            select_parts.append(f"({expression}) AS {name}")
+
+        sql = f"WITH base AS ({base_sql}) SELECT {', '.join(select_parts)} FROM base"
+
+        try:
+            result_df = conn.execute(sql).fetchdf()
+            conn.close()
+            return result_df
+        except Exception as e:
+            conn.close()
+            raise ValueError(f"Failed to apply post-processing: {e}") from e
+
+    def _validate_predictions(
+        self,
+        df: pd.DataFrame,
+        validation_cfg: List[Dict[str, Any]],
+    ) -> None:
+        """
+        Run validation checks on predictions.
+
+        Args:
+            df: DataFrame with predictions
+            validation_cfg: List of validation rule configs
+
+        Raises:
+            ValueError: If validation fails with error_on_fail=True
+        """
+        if df.empty:
+            return
+
+        for rule in validation_cfg:
+            rule_type = rule.get("type")
+
+            if rule_type == "group_count":
+                self._validate_group_count(df, rule)
+            elif rule_type == "group_sum":
+                self._validate_group_sum(df, rule)
+            elif rule_type == "column_range":
+                self._validate_column_range(df, rule)
+            elif rule_type == "not_null":
+                self._validate_not_null(df, rule)
+            elif rule_type == "required_columns":
+                self._validate_required_columns(df, rule)
+            else:
+                raise ValueError(f"Unknown validation type: {rule_type}")
+
+    def _validate_group_count(self, df: pd.DataFrame, rule: Dict[str, Any]) -> None:
+        """Validate the count of rows per group."""
+        group_by = rule.get("group_by")
+        min_count = rule.get("min")
+        max_count = rule.get("max")
+        error_on_fail = rule.get("error_on_fail", True)
+        message = rule.get("message", "Group count validation failed")
+
+        if not group_by:
+            raise ValueError("group_count validation requires 'group_by'")
+
+        counts = df.groupby(group_by).size()
+
+        failed_groups = []
+        for group_value, count in counts.items():
+            if (min_count is not None and count < min_count) or \
+               (max_count is not None and count > max_count):
+                failed_groups.append((group_value, count))
+
+        if failed_groups:
+            for group_value, count in failed_groups:
+                formatted_message = message.format(group_value=group_value, count=count)
+                if error_on_fail:
+                    raise ValueError(formatted_message)
+                else:
+                    print(f"WARNING: {formatted_message}")
+
+    def _validate_group_sum(self, df: pd.DataFrame, rule: Dict[str, Any]) -> None:
+        """Validate the sum of a column per group."""
+        group_by = rule.get("group_by")
+        column = rule.get("column")
+        expected = rule.get("expected")
+        tolerance = rule.get("tolerance", 0.0)
+        error_on_fail = rule.get("error_on_fail", True)
+        warning_on_fail = rule.get("warning_on_fail", False)
+        message = rule.get("message", "Group sum validation failed")
+
+        if not group_by or not column:
+            raise ValueError("group_sum validation requires 'group_by' and 'column'")
+
+        if expected is None:
+            raise ValueError("group_sum validation requires 'expected' value")
+
+        sums = df.groupby(group_by)[column].sum()
+
+        failed_groups = []
+        for group_value, sum_value in sums.items():
+            if abs(sum_value - expected) > tolerance:
+                failed_groups.append((group_value, sum_value))
+
+        if failed_groups:
+            for group_value, sum_value in failed_groups:
+                formatted_message = message.format(group_value=group_value, sum=sum_value)
+                if error_on_fail:
+                    raise ValueError(formatted_message)
+                elif warning_on_fail:
+                    print(f"WARNING: {formatted_message}")
+
+    def _validate_column_range(self, df: pd.DataFrame, rule: Dict[str, Any]) -> None:
+        """Validate that column values are within a specified range."""
+        column = rule.get("column")
+        min_value = rule.get("min")
+        max_value = rule.get("max")
+        error_on_fail = rule.get("error_on_fail", True)
+        message = rule.get("message", "Column range validation failed")
+
+        if not column:
+            raise ValueError("column_range validation requires 'column'")
+
+        if column not in df.columns:
+            raise ValueError(f"Column '{column}' not found in dataframe")
+
+        out_of_range = df[
+            (df[column] < min_value) if min_value is not None else False |
+            (df[column] > max_value) if max_value is not None else False
+        ]
+
+        if not out_of_range.empty:
+            for _, row in out_of_range.iterrows():
+                # Try to format message with row data
+                try:
+                    formatted_message = message.format(**row.to_dict(), value=row[column])
+                except KeyError:
+                    formatted_message = f"{message} (column={column}, value={row[column]})"
+
+                if error_on_fail:
+                    raise ValueError(formatted_message)
+                else:
+                    print(f"WARNING: {formatted_message}")
+
+    def _validate_not_null(self, df: pd.DataFrame, rule: Dict[str, Any]) -> None:
+        """Validate that columns do not contain null values."""
+        columns = rule.get("columns", [])
+        error_on_fail = rule.get("error_on_fail", True)
+        message = rule.get("message", "Null values found")
+
+        if not columns:
+            raise ValueError("not_null validation requires 'columns'")
+
+        for column in columns:
+            if column not in df.columns:
+                raise ValueError(f"Column '{column}' not found in dataframe")
+
+            null_count = df[column].isna().sum()
+            if null_count > 0:
+                formatted_message = f"{message} (column={column}, null_count={null_count})"
+                if error_on_fail:
+                    raise ValueError(formatted_message)
+                else:
+                    print(f"WARNING: {formatted_message}")
+
+    def _validate_required_columns(self, df: pd.DataFrame, rule: Dict[str, Any]) -> None:
+        """Validate that all required columns are present."""
+        columns = rule.get("columns", [])
+        error_on_fail = rule.get("error_on_fail", True)
+
+        if not columns:
+            raise ValueError("required_columns validation requires 'columns'")
+
+        missing = [col for col in columns if col not in df.columns]
+
+        if missing:
+            message = f"Missing required columns: {', '.join(missing)}"
+            if error_on_fail:
+                raise ValueError(message)
+            else:
+                print(f"WARNING: {message}")
 
     def _write_outputs(
         self,
