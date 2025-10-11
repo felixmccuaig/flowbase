@@ -178,25 +178,22 @@ class InferenceRunner:
         Resolve feature path from model config.
         Flow: model.yaml → feature_set → data/features/{feature_set}.parquet
         """
-        # Find model config file
-        models_base = config_dir
-        # Walk up to find models directory
-        while models_base != models_base.parent:
-            model_config_path = models_base / "models" / f"{model_name}.yaml"
-            if model_config_path.exists():
-                break
-            models_base = models_base.parent
-        else:
-            # Try models_dir as absolute or relative
-            models_path = Path(models_dir)
-            if not models_path.is_absolute():
-                models_path = config_dir / models_path
-            model_config_path = models_path / f"{model_name}.yaml"
+        # Start from config_dir and walk up to find project root with models/ directory
+        search_dir = config_dir.resolve()
+        model_config_path = None
 
-        if not model_config_path.exists():
+        # Walk up directory tree looking for models/{model_name}.yaml
+        while search_dir != search_dir.parent:
+            candidate = search_dir / "models" / f"{model_name}.yaml"
+            if candidate.exists():
+                model_config_path = candidate
+                break
+            search_dir = search_dir.parent
+
+        if not model_config_path:
             raise FileNotFoundError(
-                f"Model config not found: {model_config_path}. "
-                f"Searched from {config_dir} up to project root."
+                f"Model config not found: models/{model_name}.yaml. "
+                f"Searched from {config_dir} up to root."
             )
 
         # Load model config to get feature_set
@@ -210,17 +207,17 @@ class InferenceRunner:
             )
 
         # Resolve to materialized features: data/features/{feature_set}.parquet
-        # Walk up to find data/features directory
-        features_base = model_config_path.parent
-        while features_base != features_base.parent:
-            feature_path = features_base.parent / "data" / "features" / f"{feature_set}.parquet"
-            if feature_path.exists():
-                return str(feature_path)
-            features_base = features_base.parent
+        # Use the same project root where we found the model config
+        project_root = model_config_path.parent.parent  # models/ -> project_root
+        feature_path = project_root / "data" / "features" / f"{feature_set}.parquet"
 
-        # If not found, return expected path and let it fail later with clear error
-        expected_path = config_dir / "data" / "features" / f"{feature_set}.parquet"
-        return str(expected_path)
+        if not feature_path.exists():
+            raise FileNotFoundError(
+                f"Feature file not found: {feature_path}. "
+                f"Expected materialized features at data/features/{feature_set}.parquet"
+            )
+
+        return str(feature_path)
 
     def _discover_default_config(self, model_name: str) -> Path:
         base = self.base_dir / model_name
