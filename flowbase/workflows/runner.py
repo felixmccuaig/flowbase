@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import re
+import traceback
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -39,6 +41,7 @@ class TaskResult:
     status: TaskStatus
     output: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
+    error_traceback: Optional[str] = None
     duration_seconds: Optional[float] = None
 
 
@@ -59,12 +62,39 @@ class WorkflowRunner:
 
     DEFAULT_CONFIG_FILENAMES = ("workflow.yaml", "config.yaml")
 
-    def __init__(self, base_dir: str = "workflows"):
+    def __init__(self, base_dir: str = "workflows", logs_dir: str = "logs/workflows"):
         self.base_dir = Path(base_dir)
+        self.logs_dir = Path(logs_dir)
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
+        self.logger: Optional[logging.Logger] = None
+        self.log_file: Optional[Path] = None
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+    def _setup_logging(self, workflow_name: str) -> None:
+        """Set up logging for a workflow run."""
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        self.log_file = self.logs_dir / f"{workflow_name}_{timestamp}.log"
+
+        # Create logger
+        self.logger = logging.getLogger(f"workflow.{workflow_name}")
+        self.logger.setLevel(logging.DEBUG)
+        self.logger.handlers.clear()
+
+        # File handler with detailed formatting
+        file_handler = logging.FileHandler(self.log_file)
+        file_handler.setLevel(logging.DEBUG)
+        formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+        file_handler.setFormatter(formatter)
+        self.logger.addHandler(file_handler)
+
+        self.logger.info(f"Starting workflow: {workflow_name}")
+        self.logger.info(f"Log file: {self.log_file}")
+
     def load_config(
         self,
         workflow_name: str,
@@ -103,9 +133,15 @@ class WorkflowRunner:
         Returns:
             Dictionary with workflow execution results
         """
+        # Set up logging
+        self._setup_logging(workflow_name)
+
         runtime_params = params or {}
         config, config_file = self.load_config(workflow_name, config_path=config_path)
         config_dir = config_file.parent
+
+        self.logger.info(f"Loaded config from: {config_file}")
+        self.logger.info(f"Runtime params: {runtime_params}")
 
         # Resolve template variables
         template_vars = self._build_template_vars(config, runtime_params)
@@ -130,9 +166,14 @@ class WorkflowRunner:
         results: List[TaskResult] = []
         task_outputs: Dict[str, Any] = {}
 
+        self.logger.info(f"Executing {len(execution_order)} tasks")
+
         for task in execution_order:
+            self.logger.info(f"Starting task: {task.name} (type: {task.task_type})")
+
             # Check dependencies
             if not self._check_dependencies(task, results):
+                self.logger.warning(f"Task {task.name} skipped: dependencies failed")
                 results.append(TaskResult(
                     name=task.name,
                     status=TaskStatus.SKIPPED,
@@ -144,6 +185,7 @@ class WorkflowRunner:
             if task.condition and not self._evaluate_condition(
                 task.condition, template_vars, task_outputs
             ):
+                self.logger.warning(f"Task {task.name} skipped: condition not met: {task.condition}")
                 results.append(TaskResult(
                     name=task.name,
                     status=TaskStatus.SKIPPED,
@@ -157,18 +199,33 @@ class WorkflowRunner:
             )
             results.append(result)
 
+            if result.status == TaskStatus.SUCCESS:
+                self.logger.info(f"Task {task.name} completed successfully in {result.duration_seconds:.2f}s")
+            else:
+                self.logger.error(f"Task {task.name} failed: {result.error}")
+                if result.error_traceback:
+                    self.logger.error(f"Traceback:\n{result.error_traceback}")
+
             if result.output:
                 task_outputs[task.name] = result.output
+
+        success = all(
+            r.status in {TaskStatus.SUCCESS, TaskStatus.SKIPPED}
+            for r in results
+        )
+
+        if success:
+            self.logger.info("Workflow completed successfully")
+        else:
+            self.logger.error("Workflow completed with errors")
 
         return {
             "workflow": config.get("name", workflow_name),
             "config_path": str(config_file),
+            "log_file": str(self.log_file) if self.log_file else None,
             "template_vars": template_vars,
             "results": [self._result_to_dict(r) for r in results],
-            "success": all(
-                r.status in {TaskStatus.SUCCESS, TaskStatus.SKIPPED}
-                for r in results
-            ),
+            "success": success,
         }
 
     def list_workflows(self) -> List[str]:
@@ -372,6 +429,8 @@ class WorkflowRunner:
             # Merge with runtime params
             all_params = {**resolved_params, **runtime_params}
 
+            self.logger.info(f"Task {task.name}: Resolved params: {all_params}")
+
             # Dispatch to appropriate runner
             if task.task_type == TaskType.SCRAPER:
                 output = self._run_scraper(task, config_dir, all_params)
@@ -395,10 +454,16 @@ class WorkflowRunner:
 
         except Exception as e:
             duration = (datetime.utcnow() - start_time).total_seconds()
+            error_tb = traceback.format_exc()
+
+            self.logger.error(f"Task {task.name} failed with exception: {e}")
+            self.logger.error(f"Full traceback:\n{error_tb}")
+
             return TaskResult(
                 name=task.name,
                 status=TaskStatus.FAILED,
                 error=str(e),
+                error_traceback=error_tb,
                 duration_seconds=duration,
             )
 
@@ -460,20 +525,18 @@ class WorkflowRunner:
         params: Dict[str, Any]
     ) -> Dict[str, Any]:
         """Run a feature generation task."""
-        import subprocess
         import yaml
+        from flowbase.workflows.dependency_resolver import DependencyResolver
+        from flowbase.workflows.table_loader import TableLoader
+        from flowbase.query.engines.duckdb_engine import DuckDBEngine
+        from flowbase.pipelines.feature_compiler import FeatureCompiler
 
         # Resolve config path relative to project root
         config_path = self._resolve_task_config_path(task.config, config_dir)
 
-        # Load feature config to get name
-        with open(config_path, 'r', encoding='utf-8') as f:
-            config = yaml.safe_load(f)
+        self.logger.info(f"Running features task with config: {config_path}")
 
-        feature_config = config.get('features', config)
-        feature_name = feature_config.get('name', 'features')
-
-        # Find project root for output path
+        # Find project root
         search_dir = Path(config_path).parent.resolve()
         project_root = None
         while search_dir != search_dir.parent:
@@ -485,27 +548,76 @@ class WorkflowRunner:
         if not project_root:
             project_root = Path(config_path).parent.parent
 
-        output_path = project_root / "data" / "features" / f"{feature_name}.parquet"
+        # Initialize DuckDB engine
+        engine = DuckDBEngine()
 
-        # Use the CLI command to compile features (it handles all the complexity)
-        result = subprocess.run(
-            ["flowbase", "features", "compile", config_path, "--output", str(output_path)],
-            capture_output=True,
-            text=True
-        )
+        # Resolve and load dependencies
+        self.logger.info(f"Resolving data dependencies for features")
+        resolver = DependencyResolver(project_root=project_root)
 
-        if result.returncode != 0:
-            raise RuntimeError(f"Feature compilation failed: {result.stderr}")
+        try:
+            # Resolve all dependencies
+            feature_dep = resolver.resolve_feature_dependencies(config_path)
+            feature_name = feature_dep.config.name
 
-        # Parse row count from output
-        row_count = 0
-        for line in result.stdout.split('\n'):
-            if 'Generated' in line and 'rows' in line:
-                parts = line.split()
-                for i, part in enumerate(parts):
-                    if 'rows' in part and i > 0:
-                        row_count = int(parts[i-1].replace(',', ''))
-                        break
+            self.logger.info(f"Feature name: {feature_name}")
+
+            # Determine source table name
+            if feature_dep.dataset:
+                source_table = feature_dep.dataset.name
+            else:
+                source_table = "raw_data"
+
+            # Get all table dependencies
+            tables = feature_dep.dataset.depends_on_tables if feature_dep.dataset else []
+            self.logger.info(f"Found {len(tables)} table dependencies: {[t.name for t in tables]}")
+
+            # Load all tables into DuckDB
+            if tables:
+                self.logger.info("Loading tables into DuckDB")
+                loader = TableLoader(engine)
+
+                for table in tables:
+                    try:
+                        loader.load_table(table)
+                    except Exception as e:
+                        self.logger.error(f"Failed to load table {table.name}: {e}")
+                        # Continue with other tables
+
+                # Now load datasets
+                if feature_dep.dataset:
+                    self._load_dataset_into_duckdb(engine, feature_dep.dataset, resolver, project_root)
+
+        except Exception as e:
+            self.logger.error(f"Dependency resolution/loading failed: {e}")
+            raise
+
+        # Convert feature config to dict for compiler
+        feature_config_dict = self._feature_config_to_dict(feature_dep.config)
+
+        # Compile features to SQL
+        self.logger.info(f"Compiling features with source table: {source_table}")
+        compiler = FeatureCompiler(source_table=source_table)
+        sql = compiler.compile(feature_config_dict)
+
+        self.logger.info(f"Generated SQL:\n{sql}")
+
+        # Execute feature SQL
+        try:
+            result_df = engine.execute(sql)
+            row_count = len(result_df)
+
+            self.logger.info(f"Generated {row_count:,} rows × {len(result_df.columns)} columns")
+
+            # Save to parquet
+            output_path = project_root / "data" / "features" / f"{feature_name}.parquet"
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            result_df.to_parquet(output_path)
+
+            self.logger.info(f"Saved features to: {output_path}")
+
+        finally:
+            engine.close()
 
         return {
             "type": "features",
@@ -514,6 +626,143 @@ class WorkflowRunner:
             "row_count": row_count,
             "output_path": str(output_path),
         }
+
+    def _load_dataset_into_duckdb(
+        self,
+        engine: Any,
+        dataset: Any,
+        resolver: Any,
+        project_root: Path
+    ) -> None:
+        """Load a dataset and its dependencies into DuckDB."""
+        from flowbase.pipelines.dataset_compiler import DatasetCompiler
+
+        self.logger.info(f"Loading dataset: {dataset.name}")
+
+        # Use the config from the dataset dependency
+        dataset_config_dict = self._dataset_config_to_dict(dataset.config)
+
+        # Check if this is a merged dataset with source datasets
+        if dataset.config.sources:
+            # Load each source dataset first and create alias views
+            for source_ref in dataset.config.sources:
+                # Recursively load source dataset
+                source_dep = resolver.resolve_dataset_dependencies(source_ref.dataset_config)
+                self._load_dataset_into_duckdb(engine, source_dep, resolver, project_root)
+
+                # Create view with the 'name' from the source (used by dataset compiler)
+                name_sql = f"CREATE OR REPLACE VIEW {source_ref.name} AS SELECT * FROM {source_dep.name}"
+                try:
+                    engine.execute(name_sql)
+                    self.logger.info(f"Created source view '{source_ref.name}' -> '{source_dep.name}'")
+                except Exception as e:
+                    self.logger.error(f"Failed to create source view {source_ref.name}: {e}")
+
+                # Also create alias view if specified (for use within the merge SQL)
+                if source_ref.alias and source_ref.alias != source_ref.name:
+                    alias_sql = f"CREATE OR REPLACE VIEW {source_ref.alias} AS SELECT * FROM {source_dep.name}"
+                    try:
+                        engine.execute(alias_sql)
+                        self.logger.info(f"Created alias view '{source_ref.alias}' -> '{source_dep.name}'")
+                    except Exception as e:
+                        self.logger.error(f"Failed to create alias view {source_ref.alias}: {e}")
+
+        # Compile and create view for this dataset
+        try:
+            compiler = DatasetCompiler(source_table="raw_data")
+            sql = compiler.compile(dataset_config_dict)
+
+            # Create view
+            view_sql = f"CREATE OR REPLACE VIEW {dataset.name} AS {sql}"
+            engine.execute(view_sql)
+
+            self.logger.info(f"Created view for dataset: {dataset.name}")
+
+        except Exception as e:
+            self.logger.error(f"Failed to load dataset {dataset.name}: {e}")
+
+    def _feature_config_to_dict(self, config: Any) -> Dict[str, Any]:
+        """Convert feature config dataclass back to dict format for compiler."""
+        result = {
+            'name': config.name,
+            'description': config.description,
+        }
+
+        if config.source:
+            result['source'] = {
+                'dataset_config': config.source.dataset_config,
+                'table': config.source.table,
+            }
+
+        if config.features:
+            result['features'] = [
+                {
+                    'name': f.name,
+                    'expression': f.expression,
+                    'description': f.description,
+                }
+                for f in config.features
+            ]
+
+        return result
+
+    def _dataset_config_to_dict(self, config: Any) -> Dict[str, Any]:
+        """Convert dataset config dataclass back to dict format for compiler."""
+        result = {
+            'name': config.name,
+            'description': config.description,
+        }
+
+        if config.source:
+            result['source'] = {
+                'table': config.source.table,
+                'table_config': config.source.table_config,
+            }
+
+        if config.sources:
+            result['sources'] = [
+                {
+                    'name': s.name,
+                    'dataset_config': s.dataset_config,
+                    'alias': s.alias,
+                }
+                for s in config.sources
+            ]
+
+        if config.join:
+            result['join'] = {
+                'type': config.join.type,
+                'conditions': config.join.conditions,
+            }
+
+        if config.columns:
+            result['columns'] = []
+            for c in config.columns:
+                col_dict = {
+                    'name': c.name,
+                    'type': c.type,
+                    'required': c.required,
+                }
+                # Only add optional fields if they have values
+                if c.source is not None:
+                    col_dict['source'] = c.source
+                if c.expression is not None:
+                    col_dict['expression'] = c.expression
+                if c.validate is not None:
+                    col_dict['validate'] = c.validate
+                result['columns'].append(col_dict)
+
+        if config.filters:
+            result['filters'] = [
+                {
+                    'column': f.column,
+                    'operator': f.operator,
+                    'value': f.value,
+                }
+                for f in config.filters
+            ]
+
+        return result
 
     def _run_inference(
         self,
@@ -600,6 +849,7 @@ class WorkflowRunner:
             "status": result.status.value,
             "output": result.output,
             "error": result.error,
+            "error_traceback": result.error_traceback,
             "duration_seconds": result.duration_seconds,
         }
 

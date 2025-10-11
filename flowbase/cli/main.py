@@ -1120,10 +1120,15 @@ def workflow_run(
 
             console.print(table)
 
+            # Display log file path
+            if result.get('log_file'):
+                console.print(f"\n[dim]Log file:[/dim] {result['log_file']}")
+
             if result['success']:
                 console.print(f"\n[green]✓[/green] Workflow completed successfully")
             else:
                 console.print(f"\n[red]✗[/red] Workflow completed with errors")
+                console.print(f"[dim]Check the log file for detailed error information[/dim]")
                 sys.exit(1)
 
     except Exception as e:
