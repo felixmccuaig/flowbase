@@ -434,14 +434,23 @@ class WorkflowRunner:
         params: Dict[str, Any]
     ) -> Dict[str, Any]:
         """Run a scraper task."""
-        # Import here to avoid circular dependencies
-        # For now, just return placeholder
-        # TODO: Implement scraper runner integration
+        from flowbase.scrapers.runner import ScraperRunner
+
+        # Resolve config path relative to project root
+        config_path = self._resolve_task_config_path(task.config, config_dir)
+
+        # Extract date parameter
+        date = params.get("date")
+
+        runner = ScraperRunner()
+        result = runner.run(config_path, date=date)
+
         return {
             "type": "scraper",
-            "config": task.config,
-            "status": "not_implemented",
-            "message": "Scraper execution not yet implemented"
+            "config": config_path,
+            "date": date,
+            "row_count": result.get("rows", 0) if result else 0,
+            "destination": result.get("destination") if result else None,
         }
 
     def _run_features(
@@ -451,12 +460,99 @@ class WorkflowRunner:
         params: Dict[str, Any]
     ) -> Dict[str, Any]:
         """Run a feature generation task."""
-        # TODO: Integrate with feature compiler
+        from flowbase.pipelines.feature_compiler import FeatureCompiler
+        from flowbase.query.engines.duckdb_engine import DuckDBEngine
+        import yaml
+
+        # Resolve config path relative to project root
+        config_path = self._resolve_task_config_path(task.config, config_dir)
+
+        # Load feature config
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = yaml.safe_load(f)
+
+        feature_config = config.get('features', config)
+        feature_name = feature_config.get('name', 'features')
+
+        # Get dataset reference
+        source = feature_config.get('source', {})
+        dataset_config_path = source.get('dataset_config')
+
+        if not dataset_config_path:
+            raise ValueError(f"Feature config must specify source.dataset_config")
+
+        # Resolve dataset config path
+        dataset_config_full = self._resolve_task_config_path(dataset_config_path, Path(config_path).parent)
+
+        # Compile and execute features
+        engine = DuckDBEngine()
+
+        # Load and compile dataset first
+        with open(dataset_config_full, 'r', encoding='utf-8') as f:
+            dataset_config = yaml.safe_load(f)
+
+        from flowbase.pipelines.dataset_compiler import DatasetCompiler
+
+        dataset_compiler = DatasetCompiler(source_table="raw_data")
+        dataset_sql = dataset_compiler.compile(dataset_config.get('dataset', dataset_config))
+
+        # Register source tables (from dataset sources)
+        sources = dataset_config.get('dataset', dataset_config).get('sources', [])
+        for source_cfg in sources:
+            source_name = source_cfg['name']
+            table_config_path = source_cfg.get('table_config')
+
+            if table_config_path:
+                # Resolve table config
+                table_config_full = self._resolve_task_config_path(table_config_path, Path(dataset_config_full).parent)
+                with open(table_config_full, 'r', encoding='utf-8') as f:
+                    table_config = yaml.safe_load(f)
+
+                table_name = table_config['table']['name']
+                base_path = table_config['table']['destination']['base_path']
+                file_format = table_config['table']['destination']['file_format']
+                pattern = f"{base_path}/*.{file_format}"
+
+                # Register table
+                engine.execute(f"CREATE OR REPLACE VIEW {table_name} AS SELECT * FROM '{pattern}'")
+
+            # Create view for dataset source
+            engine.execute(f"CREATE OR REPLACE VIEW {source_name} AS {dataset_sql}")
+
+        # Now compile and execute features
+        dataset_name = dataset_config.get('dataset', dataset_config).get('name', 'dataset')
+        compiler = FeatureCompiler(source_table=dataset_name)
+        feature_sql = compiler.compile(feature_config)
+
+        # Execute feature generation
+        result_df = engine.execute(feature_sql)
+
+        # Save to data/features/{feature_name}.parquet
+        # Find project root
+        search_dir = Path(config_path).parent.resolve()
+        project_root = None
+        while search_dir != search_dir.parent:
+            if (search_dir / "data").exists() or (search_dir / "models").exists():
+                project_root = search_dir
+                break
+            search_dir = search_dir.parent
+
+        if not project_root:
+            project_root = Path(config_path).parent.parent
+
+        output_path = project_root / "data" / "features" / f"{feature_name}.parquet"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        result_df.to_parquet(output_path, index=False)
+
+        engine.close()
+
         return {
             "type": "features",
-            "config": task.config,
-            "status": "not_implemented",
-            "message": "Feature generation not yet implemented"
+            "config": config_path,
+            "feature_name": feature_name,
+            "row_count": len(result_df),
+            "column_count": len(result_df.columns),
+            "output_path": str(output_path),
         }
 
     def _run_inference(
