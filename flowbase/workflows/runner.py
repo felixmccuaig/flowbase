@@ -220,14 +220,18 @@ class WorkflowRunner:
             "workflow_name": config.get("name", "unknown"),
         }
 
-        # Merge runtime params
-        template_vars.update(runtime_params)
-
-        # Merge config-level params
+        # Merge config-level params (substitute templates first)
         config_params = config.get("params", {})
         for key, value in config_params.items():
             if key not in template_vars:
-                template_vars[key] = value
+                # Substitute any templates in config param values
+                if isinstance(value, str):
+                    template_vars[key] = self._substitute_templates(value, template_vars)
+                else:
+                    template_vars[key] = value
+
+        # Merge runtime params (override config params)
+        template_vars.update(runtime_params)
 
         return template_vars
 
