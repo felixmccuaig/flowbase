@@ -23,15 +23,15 @@ class TableLoader:
         self.data_root = Path(data_root) if data_root else None
 
         # Check if S3 sync is enabled from project config
-        # In Lambda (when data_root is set), prefer local /tmp files over S3
-        self.s3_enabled = self.project_config.get('sync_artifacts', False) and not self.data_root
+        # In Lambda, we use S3 for historical tables but check /tmp first
+        self.s3_enabled = self.project_config.get('sync_artifacts', False)
         storage_config = self.project_config.get('storage', {})
         self.s3_bucket = storage_config.get('bucket') if isinstance(storage_config, dict) else None
         self.s3_prefix = storage_config.get('prefix', '') if isinstance(storage_config, dict) else ''
 
         if self.s3_enabled and self.s3_bucket:
             self.logger.info(f"S3 sync enabled for tables: s3://{self.s3_bucket}/{self.s3_prefix}")
-        elif self.data_root:
+        if self.data_root:
             self.logger.info(f"Using local data root: {self.data_root}")
 
     def load_table(self, table: TableDependency) -> None:
@@ -45,10 +45,25 @@ class TableLoader:
 
         config = table.config
 
-        # Priority: 1) Explicit S3 source in table config, 2) Project-level S3 sync, 3) Local
+        # Priority: 1) Explicit S3 source in table config, 2) Local if data_root exists, 3) S3 auto, 4) Local fallback
         if config.source and config.source.type == SourceType.S3:
             # Explicit S3 source in table config
             self._load_from_s3(table)
+        elif self.data_root:
+            # In Lambda with data_root: try local first, fallback to S3 if local doesn't exist
+            storage_config = config.storage_config
+            if storage_config:
+                base_path = self.data_root / Path(storage_config.base_path)
+                if base_path.exists():
+                    self.logger.info(f"Loading table {table.name} from local /tmp")
+                    self._load_from_local(table)
+                elif self.s3_enabled and self.s3_bucket:
+                    self.logger.info(f"Local path not found, loading table {table.name} from S3")
+                    self._load_from_s3_auto(table)
+                else:
+                    self.logger.warning(f"Table {table.name} not found locally or in S3")
+            else:
+                self._load_from_local(table)
         elif self.s3_enabled and self.s3_bucket:
             # Project-level S3 sync enabled - auto-construct S3 path from storage.base_path
             self._load_from_s3_auto(table)
