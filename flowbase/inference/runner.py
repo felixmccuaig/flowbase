@@ -43,6 +43,15 @@ class InferenceRunner:
         self.data_root = Path(data_root) if data_root else None
         self.s3_bucket = s3_bucket
         self.s3_prefix = s3_prefix
+        self.s3_sync = None
+
+        # Initialize S3 sync if bucket provided
+        if s3_bucket:
+            try:
+                from flowbase.storage.s3_sync import S3Sync
+                self.s3_sync = S3Sync(bucket=s3_bucket, prefix=s3_prefix)
+            except ImportError:
+                pass  # S3 sync not available
 
     @property
     def table_manager(self) -> TableManager:
