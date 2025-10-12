@@ -1017,13 +1017,143 @@ class WorkflowRunner:
         config_dir: Path,
         params: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Run a custom task (user-defined script)."""
-        # TODO: Implement custom task runner
+        """Run a custom task (user-defined script or binary)."""
+        import subprocess
+        import json
+        import os
+
+        # Resolve config path relative to project root
+        config_path = self._resolve_task_config_path(task.config, config_dir)
+
+        # Find project root
+        search_dir = Path(config_path).parent.resolve()
+        project_root = None
+        while search_dir != search_dir.parent:
+            if (search_dir / "data").exists() or (search_dir / "models").exists():
+                project_root = search_dir
+                break
+            search_dir = search_dir.parent
+
+        if not project_root:
+            project_root = Path(config_path).parent.parent
+
+        # Load project config if not already loaded
+        if not self.project_config:
+            self._load_project_config(project_root)
+
+        self.logger.info(f"Running custom task with config: {config_path}")
+
+        # Load custom task config
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+
+        # Get command and arguments
+        command = config.get('command', [])
+        if isinstance(command, str):
+            command = [command]
+        elif not isinstance(command, list):
+            raise ValueError("Command must be a string or list")
+
+        # Substitute template variables in command
+        command = [self._substitute_templates(str(arg), params) for arg in command]
+
+        # Resolve command path relative to project root if it's a relative path
+        if command and not command[0].startswith('/'):
+            command_path = project_root / command[0]
+            if command_path.exists():
+                command[0] = str(command_path)
+
+        self.logger.info(f"Executing custom command: {' '.join(command)}")
+
+        # Set working directory to project root
+        working_dir = config.get('working_dir', str(project_root))
+        working_dir = self._substitute_templates(working_dir, params)
+
+        # Set environment variables if specified
+        env = os.environ.copy()
+        if config.get('env'):
+            for key, value in config['env'].items():
+                env[key] = self._substitute_templates(str(value), params)
+
+        # Execute command
+        start_time = datetime.utcnow()
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=False,
+                cwd=working_dir,
+                env=env
+            )
+        except Exception as e:
+            self.logger.error(f"Failed to execute command: {e}")
+            raise RuntimeError(f"Custom task execution failed: {e}")
+
+        duration = (datetime.utcnow() - start_time).total_seconds()
+
+        if result.returncode != 0:
+            self.logger.error(f"Command failed with exit code {result.returncode}")
+            self.logger.error(f"stderr: {result.stderr}")
+            raise RuntimeError(f"Custom task failed with exit code {result.returncode}: {result.stderr}")
+
+        self.logger.info(f"Command completed successfully in {duration:.2f}s")
+        if result.stdout:
+            self.logger.info(f"stdout: {result.stdout}")
+
+        # Parse output if JSON
+        output_data = {}
+        if result.stdout.strip():
+            try:
+                output_data = json.loads(result.stdout)
+                self.logger.info(f"Parsed JSON output: {output_data}")
+            except json.JSONDecodeError:
+                output_data = {"stdout": result.stdout.strip()}
+
+        # Handle output files specified in config
+        outputs = {}
+        s3_urls = []
+        if config.get('outputs'):
+            for output_name, output_path in config['outputs'].items():
+                # Substitute template variables in output path
+                resolved_path = self._substitute_templates(str(output_path), params)
+                output_file = Path(resolved_path)
+
+                # Convert to absolute path if relative
+                if not output_file.is_absolute():
+                    output_file = project_root / output_file
+
+                if output_file.exists():
+                    outputs[output_name] = str(output_file)
+                    self.logger.info(f"Output file created: {output_name} -> {output_file}")
+
+                    # Sync to S3 if enabled
+                    if self.s3_sync:
+                        self.logger.info(f"Syncing custom task output to S3: {output_file}")
+                        # Construct S3 key based on the local path structure
+                        data_root = os.environ.get('FLOWBASE_DATA_ROOT')
+                        if data_root and output_file.is_relative_to(Path(data_root)):
+                            relative_path = output_file.relative_to(Path(data_root))
+                        else:
+                            relative_path = output_file.relative_to(project_root)
+                        s3_key = str(relative_path)
+                        if self.s3_sync.upload_file(output_file, s3_key):
+                            s3_url = f"s3://{self.s3_sync.bucket}/{self.s3_sync.prefix}/{s3_key}".replace("//", "/")
+                            s3_urls.append(s3_url)
+                            self.logger.info(f"Custom task output synced to S3: {s3_url}")
+                        else:
+                            self.logger.warning(f"Failed to sync output to S3: {output_file}")
+                else:
+                    self.logger.warning(f"Expected output file not found: {output_file}")
+
         return {
             "type": "custom",
-            "config": task.config,
-            "status": "not_implemented",
-            "message": "Custom task execution not yet implemented"
+            "command": " ".join(command),
+            "exit_code": result.returncode,
+            "duration_seconds": duration,
+            "outputs": outputs if outputs else None,
+            "s3_urls": s3_urls if s3_urls else None,
+            **output_data
         }
 
     def _resolve_task_config_path(self, config_path: str, workflow_dir: Path) -> str:
