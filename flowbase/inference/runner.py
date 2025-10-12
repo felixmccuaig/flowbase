@@ -918,7 +918,7 @@ class InferenceRunner:
 
         # Save feature snapshot if enabled
         save_features = output_cfg.get("save_features_snapshot", False)
-        if save_features and feature_path and where_clause and self.s3_bucket:
+        if save_features and feature_path and where_clause and self.s3_sync:
             try:
                 from flowbase.query.engines.duckdb_engine import DuckDBEngine
 
