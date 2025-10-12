@@ -16,14 +16,14 @@ if TYPE_CHECKING:
 class TableLoader:
     """Loads tables into DuckDB from various sources."""
 
-    def __init__(self, engine: DuckDBEngine, project_config: Optional[Dict[str, Any]] = None, data_root: Optional[str] = None):
+    def __init__(self, engine: DuckDBEngine, project_config: Optional[Dict[str, Any]] = None, data_root: Optional[str] = None, prefer_s3: bool = True):
         self.engine = engine
         self.logger = logging.getLogger(__name__)
         self.project_config = project_config or {}
         self.data_root = Path(data_root) if data_root else None
+        self.prefer_s3 = prefer_s3  # For Lambda: prefer S3 for full historical data
 
         # Check if S3 sync is enabled from project config
-        # In Lambda, we use S3 for historical tables but check /tmp first
         self.s3_enabled = self.project_config.get('sync_artifacts', False)
         storage_config = self.project_config.get('storage', {})
         self.s3_bucket = storage_config.get('bucket') if isinstance(storage_config, dict) else None
@@ -33,6 +33,8 @@ class TableLoader:
             self.logger.info(f"S3 sync enabled for tables: s3://{self.s3_bucket}/{self.s3_prefix}")
         if self.data_root:
             self.logger.info(f"Using local data root: {self.data_root}")
+        if self.prefer_s3 and self.s3_enabled:
+            self.logger.info(f"Preferring S3 for full historical data")
 
     def load_table(self, table: TableDependency) -> None:
         """
@@ -45,12 +47,16 @@ class TableLoader:
 
         config = table.config
 
-        # Priority: 1) Explicit S3 source in table config, 2) Local if data_root exists, 3) S3 auto, 4) Local fallback
+        # Priority: 1) Explicit S3 source, 2) S3 if prefer_s3 is True, 3) Local with S3 fallback
         if config.source and config.source.type == SourceType.S3:
             # Explicit S3 source in table config
             self._load_from_s3(table)
+        elif self.prefer_s3 and self.s3_enabled and self.s3_bucket:
+            # In Lambda: prefer S3 to get full historical data, not just today's /tmp file
+            self.logger.info(f"Loading table {table.name} from S3 (full historical data)")
+            self._load_from_s3_auto(table)
         elif self.data_root:
-            # In Lambda with data_root: try local first, fallback to S3 if local doesn't exist
+            # Local with S3 fallback (for non-feature workflows)
             storage_config = config.storage_config
             if storage_config:
                 base_path = self.data_root / Path(storage_config.base_path)
