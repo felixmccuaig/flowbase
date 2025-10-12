@@ -955,7 +955,21 @@ class WorkflowRunner:
         data_root = os.environ.get('FLOWBASE_DATA_ROOT')
         metadata_db = os.environ.get('FLOWBASE_METADATA_DB')
 
-        runner = InferenceRunner(metadata_db=metadata_db, data_root=data_root)
+        # Get S3 configuration from project config
+        s3_bucket = None
+        s3_prefix = ""
+        if self.project_config:
+            storage_config = self.project_config.get('storage', {})
+            if isinstance(storage_config, dict):
+                s3_bucket = storage_config.get('bucket')
+                s3_prefix = storage_config.get('prefix', '')
+
+        runner = InferenceRunner(
+            metadata_db=metadata_db,
+            data_root=data_root,
+            s3_bucket=s3_bucket,
+            s3_prefix=s3_prefix
+        )
         result = runner.run(
             model_name=model_name,
             params=params,

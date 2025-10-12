@@ -322,6 +322,23 @@ class ModelTrainer:
         model_path = self.models_dir / f"{model_name}.pkl"
         metadata_path = self.models_dir / f"{model_name}_metadata.json"
 
+        # If model doesn't exist locally and S3 is enabled, try to download from S3
+        if not model_path.exists() and self.s3_sync:
+            logger.info(f"Model not found locally, attempting to download from S3: {model_name}")
+            try:
+                # Download model file from S3
+                model_s3_key = f"data/models/{model_name}.pkl"
+                self.s3_sync.download_file(model_s3_key, str(model_path))
+                logger.info(f"Downloaded model from S3: {model_name}")
+
+                # Download metadata file from S3
+                metadata_s3_key = f"data/models/{model_name}_metadata.json"
+                self.s3_sync.download_file(metadata_s3_key, str(metadata_path))
+                logger.info(f"Downloaded model metadata from S3: {model_name}")
+            except Exception as e:
+                logger.error(f"Failed to download model from S3: {e}")
+                raise FileNotFoundError(f"Model not found locally or in S3: {model_path}") from e
+
         if not model_path.exists():
             raise FileNotFoundError(f"Model not found: {model_path}")
 

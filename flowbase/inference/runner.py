@@ -35,11 +35,14 @@ class InferenceRunner:
 
     DEFAULT_CONFIG_FILENAMES = ("config.yaml", "inference.yaml")
 
-    def __init__(self, base_dir: str = "inference", metadata_db: Optional[str] = None, data_root: Optional[str] = None):
+    def __init__(self, base_dir: str = "inference", metadata_db: Optional[str] = None, data_root: Optional[str] = None,
+                 s3_bucket: Optional[str] = None, s3_prefix: Optional[str] = ""):
         self.base_dir = Path(base_dir)
         self.metadata_db = metadata_db or "data/tables/.metadata.db"
         self._table_manager: Optional[TableManager] = None
         self.data_root = Path(data_root) if data_root else None
+        self.s3_bucket = s3_bucket
+        self.s3_prefix = s3_prefix
 
     @property
     def table_manager(self) -> TableManager:
@@ -87,7 +90,12 @@ class InferenceRunner:
             raise ValueError("Config 'model' must be a string (model name)")
 
         models_dir = config.get("models_dir", "data/models")
-        trainer = ModelTrainer(models_dir=models_dir, data_root=str(self.data_root) if self.data_root else None)
+        trainer = ModelTrainer(
+            models_dir=models_dir,
+            data_root=str(self.data_root) if self.data_root else None,
+            s3_bucket=self.s3_bucket,
+            s3_prefix=self.s3_prefix
+        )
 
         # Auto-resolve feature path: model config → feature_set → data/features/{feature_set}.parquet
         feature_path = self._resolve_feature_path_from_model(target_model, models_dir, config_dir)
