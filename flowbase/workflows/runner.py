@@ -988,7 +988,13 @@ class WorkflowRunner:
                     if output_file.exists() and output_file.suffix == '.parquet':
                         self.logger.info(f"Syncing prediction output to S3: {output_file}")
                         # Construct S3 key based on the local path structure
-                        relative_path = output_file.relative_to(project_root)
+                        # If using data_root (Lambda /tmp), strip it to get the original relative path
+                        import os
+                        data_root_env = os.environ.get('FLOWBASE_DATA_ROOT')
+                        if data_root_env and output_file.is_relative_to(Path(data_root_env)):
+                            relative_path = output_file.relative_to(Path(data_root_env))
+                        else:
+                            relative_path = output_file.relative_to(project_root)
                         s3_key = str(relative_path)
                         if self.s3_sync.upload_file(output_file, s3_key):
                             s3_url = f"s3://{self.s3_sync.bucket}/{self.s3_sync.prefix}/{s3_key}".replace("//", "/")
