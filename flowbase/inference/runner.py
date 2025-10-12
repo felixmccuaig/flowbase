@@ -155,6 +155,8 @@ class InferenceRunner:
                 config_dir=config_dir,
                 params=normalized_params,
                 job_name=job_name,
+                feature_path=feature_path,
+                where_clause=where_clause,
             )
 
         return {
@@ -805,6 +807,8 @@ class InferenceRunner:
         config_dir: Path,
         params: Dict[str, Any],
         job_name: Optional[str] = None,
+        feature_path: Optional[str] = None,
+        where_clause: Optional[str] = None,
     ) -> Dict[str, Any]:
         info: Dict[str, Any] = {}
         if df.empty and output_cfg.get("skip_if_empty", True):
@@ -911,6 +915,90 @@ class InferenceRunner:
             info["table"] = ingestion_result
 
             temp_file.unlink(missing_ok=True)
+
+        # Save feature snapshot if enabled
+        save_features = output_cfg.get("save_features_snapshot", False)
+        if save_features and feature_path and where_clause and self.s3_bucket:
+            try:
+                from flowbase.query.engines.duckdb_engine import DuckDBEngine
+
+                # Query the features that were used for these predictions
+                sql = f"""
+                SELECT *
+                FROM read_parquet('{feature_path}')
+                WHERE {where_clause}
+                """
+
+                engine = DuckDBEngine()
+                features_df = engine.execute(sql)
+                engine.close()
+
+                if not features_df.empty:
+                    # Determine where to save the feature snapshot
+                    if file_cfg:
+                        # Save in the same directory as the prediction file
+                        if directory:
+                            if directory.startswith("/"):
+                                features_dir = Path(directory)
+                            else:
+                                features_dir = Path(self._resolve_path(directory, config_dir))
+                        else:
+                            # Get directory from the saved prediction file path
+                            prediction_path = Path(info.get("file", ""))
+                            features_dir = prediction_path.parent
+
+                        features_dir.mkdir(parents=True, exist_ok=True)
+
+                        # Generate filename: features_{date}.parquet or features_{timestamp}.parquet
+                        filename_template = file_cfg.get("filename", "")
+                        if "{date}" in filename_template or "predictions_" in filename_template:
+                            # Extract the date/timestamp from the predictions filename
+                            features_filename = filename_template.replace("predictions_", "features_")
+                            try:
+                                features_filename = features_filename.format(**params)
+                            except KeyError:
+                                pass
+                        else:
+                            # Fallback to timestamp
+                            timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+                            features_filename = f"features_{timestamp}.parquet"
+
+                        features_path_local = features_dir / features_filename
+                        features_df.to_parquet(features_path_local, index=False)
+
+                        # Upload to S3 if sync is enabled
+                        if self.s3_sync:
+                            # Construct S3 key based on local path structure
+                            import os
+                            data_root_env = os.environ.get('FLOWBASE_DATA_ROOT')
+                            if data_root_env and features_path_local.is_relative_to(Path(data_root_env)):
+                                relative_path = features_path_local.relative_to(Path(data_root_env))
+                            else:
+                                # Try to find project root
+                                search_dir = config_dir.resolve()
+                                project_root = None
+                                while search_dir != search_dir.parent:
+                                    if (search_dir / "data").exists() or (search_dir / "models").exists():
+                                        project_root = search_dir
+                                        break
+                                    search_dir = search_dir.parent
+
+                                if project_root and features_path_local.is_relative_to(project_root):
+                                    relative_path = features_path_local.relative_to(project_root)
+                                else:
+                                    # Fallback: use the filename with a standard prefix
+                                    relative_path = Path("data/features") / features_filename
+
+                            s3_key = str(relative_path)
+                            if self.s3_sync.upload_file(features_path_local, s3_key):
+                                s3_url = f"s3://{self.s3_sync.bucket}/{self.s3_sync.prefix}/{s3_key}".replace("//", "/")
+                                info["features_snapshot"] = str(features_path_local)
+                                info["features_snapshot_s3"] = s3_url
+            except Exception as e:
+                # Log error but don't fail the entire inference job
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning(f"Failed to save feature snapshot: {e}")
 
         return info
 
