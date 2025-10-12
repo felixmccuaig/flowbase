@@ -660,7 +660,10 @@ class WorkflowRunner:
             # Load all tables into DuckDB
             if tables:
                 self.logger.info("Loading tables into DuckDB")
-                loader = TableLoader(engine, project_config=self.project_config)
+                # Check for data_root environment variable for Lambda support
+                import os
+                data_root = os.environ.get('FLOWBASE_DATA_ROOT')
+                loader = TableLoader(engine, project_config=self.project_config, data_root=data_root)
 
                 for table in tables:
                     try:
@@ -718,7 +721,13 @@ class WorkflowRunner:
             self.logger.info(f"Generated {row_count:,} rows × {len(result_df.columns)} columns")
 
             # Save to parquet
-            output_path = project_root / "data" / "features" / f"{feature_name}.parquet"
+            # Use data_root if specified (for Lambda /tmp support)
+            import os
+            data_root = os.environ.get('FLOWBASE_DATA_ROOT')
+            if data_root:
+                output_path = Path(data_root) / "data" / "features" / f"{feature_name}.parquet"
+            else:
+                output_path = project_root / "data" / "features" / f"{feature_name}.parquet"
             output_path.parent.mkdir(parents=True, exist_ok=True)
             result_df.to_parquet(output_path)
 

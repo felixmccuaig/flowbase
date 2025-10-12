@@ -16,19 +16,23 @@ if TYPE_CHECKING:
 class TableLoader:
     """Loads tables into DuckDB from various sources."""
 
-    def __init__(self, engine: DuckDBEngine, project_config: Optional[Dict[str, Any]] = None):
+    def __init__(self, engine: DuckDBEngine, project_config: Optional[Dict[str, Any]] = None, data_root: Optional[str] = None):
         self.engine = engine
         self.logger = logging.getLogger(__name__)
         self.project_config = project_config or {}
+        self.data_root = Path(data_root) if data_root else None
 
         # Check if S3 sync is enabled from project config
-        self.s3_enabled = self.project_config.get('sync_artifacts', False)
+        # In Lambda (when data_root is set), prefer local /tmp files over S3
+        self.s3_enabled = self.project_config.get('sync_artifacts', False) and not self.data_root
         storage_config = self.project_config.get('storage', {})
         self.s3_bucket = storage_config.get('bucket') if isinstance(storage_config, dict) else None
         self.s3_prefix = storage_config.get('prefix', '') if isinstance(storage_config, dict) else ''
 
         if self.s3_enabled and self.s3_bucket:
             self.logger.info(f"S3 sync enabled for tables: s3://{self.s3_bucket}/{self.s3_prefix}")
+        elif self.data_root:
+            self.logger.info(f"Using local data root: {self.data_root}")
 
     def load_table(self, table: TableDependency) -> None:
         """
@@ -159,6 +163,10 @@ class TableLoader:
             return
 
         base_path = Path(storage_config.base_path)
+
+        # Prepend data_root if specified (for Lambda /tmp support)
+        if self.data_root:
+            base_path = self.data_root / base_path
 
         if not base_path.exists():
             self.logger.warning(f"Table path does not exist: {base_path}")
