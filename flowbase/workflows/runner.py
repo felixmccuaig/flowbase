@@ -950,7 +950,12 @@ class WorkflowRunner:
         # Extract model name from config path or use task name
         model_name = Path(config_path).parent.name
 
-        runner = InferenceRunner()
+        # Check for data_root environment variable for Lambda support
+        import os
+        data_root = os.environ.get('FLOWBASE_DATA_ROOT')
+        metadata_db = os.environ.get('FLOWBASE_METADATA_DB')
+
+        runner = InferenceRunner(metadata_db=metadata_db, data_root=data_root)
         result = runner.run(
             model_name=model_name,
             params=params,

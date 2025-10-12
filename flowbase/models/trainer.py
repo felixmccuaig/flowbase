@@ -20,16 +20,24 @@ class ModelTrainer:
         self,
         models_dir: str = "data/models",
         s3_bucket: Optional[str] = None,
-        s3_prefix: Optional[str] = ""
+        s3_prefix: Optional[str] = "",
+        data_root: Optional[str] = None
     ):
         """Initialize trainer.
 
         Args:
-            models_dir: Directory to save trained models
+            models_dir: Directory to save trained models (relative or absolute)
             s3_bucket: Optional S3 bucket for syncing artifacts
             s3_prefix: Optional S3 prefix (e.g., "flowbase-greyhounds/")
+            data_root: Optional root directory for Lambda /tmp support
         """
-        self.models_dir = Path(models_dir)
+        # If data_root is provided and models_dir is relative, prepend data_root
+        models_path = Path(models_dir)
+        if data_root and not models_path.is_absolute():
+            self.models_dir = Path(data_root) / models_path
+        else:
+            self.models_dir = models_path
+
         self.models_dir.mkdir(parents=True, exist_ok=True)
 
         self.s3_bucket = s3_bucket

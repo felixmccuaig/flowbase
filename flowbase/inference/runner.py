@@ -35,10 +35,11 @@ class InferenceRunner:
 
     DEFAULT_CONFIG_FILENAMES = ("config.yaml", "inference.yaml")
 
-    def __init__(self, base_dir: str = "inference", metadata_db: Optional[str] = None):
+    def __init__(self, base_dir: str = "inference", metadata_db: Optional[str] = None, data_root: Optional[str] = None):
         self.base_dir = Path(base_dir)
         self.metadata_db = metadata_db or "data/tables/.metadata.db"
         self._table_manager: Optional[TableManager] = None
+        self.data_root = Path(data_root) if data_root else None
 
     @property
     def table_manager(self) -> TableManager:
@@ -86,7 +87,7 @@ class InferenceRunner:
             raise ValueError("Config 'model' must be a string (model name)")
 
         models_dir = config.get("models_dir", "data/models")
-        trainer = ModelTrainer(models_dir=models_dir)
+        trainer = ModelTrainer(models_dir=models_dir, data_root=str(self.data_root) if self.data_root else None)
 
         # Auto-resolve feature path: model config → feature_set → data/features/{feature_set}.parquet
         feature_path = self._resolve_feature_path_from_model(target_model, models_dir, config_dir)
@@ -219,7 +220,12 @@ class InferenceRunner:
         # Resolve to materialized features: data/features/{feature_set}.parquet
         # Use the same project root where we found the model config
         project_root = model_config_path.parent.parent  # models/ -> project_root
-        feature_path = project_root / "data" / "features" / f"{feature_set}.parquet"
+
+        # If data_root is set (Lambda), use it; otherwise use project_root
+        if self.data_root:
+            feature_path = self.data_root / "data" / "features" / f"{feature_set}.parquet"
+        else:
+            feature_path = project_root / "data" / "features" / f"{feature_set}.parquet"
 
         if not feature_path.exists():
             raise FileNotFoundError(
@@ -817,7 +823,11 @@ class InferenceRunner:
                 if not project_root:
                     project_root = config_dir.resolve()
 
-                directory = str(project_root / "data" / "predictions" / job_name)
+                # Use data_root if specified (for Lambda /tmp support)
+                if self.data_root:
+                    directory = str(self.data_root / "data" / "predictions" / job_name)
+                else:
+                    directory = str(project_root / "data" / "predictions" / job_name)
 
             fmt = file_cfg.get("format", "parquet").lower()
             timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
@@ -874,7 +884,11 @@ class InferenceRunner:
 
             ingest_date = self._determine_ingest_date(table_cfg.get("date", {}), params, df)
 
-            temp_dir = Path("data/inference/.temp")
+            # Use data_root if specified (for Lambda /tmp support)
+            if self.data_root:
+                temp_dir = self.data_root / "data" / "inference" / ".temp"
+            else:
+                temp_dir = Path("data/inference/.temp")
             temp_dir.mkdir(parents=True, exist_ok=True)
             temp_file = temp_dir / f"{table_name}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.parquet"
             df.to_parquet(temp_file, index=False)
