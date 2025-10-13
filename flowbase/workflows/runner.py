@@ -118,17 +118,21 @@ class WorkflowRunner:
         self.logger.setLevel(log_level)
         self.logger.handlers.clear()
 
-        # Prevent propagation to avoid duplicate logs in Lambda
-        self.logger.propagate = False
+        # Check if running in AWS Lambda
+        is_lambda = os.environ.get('AWS_LAMBDA_FUNCTION_NAME') is not None
 
-        # Single handler that logs to console (captured by Lambda CloudWatch)
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(log_level)
-
-        # Simple formatter without timestamp (Lambda adds its own)
-        formatter = logging.Formatter('[%(levelname)s] %(message)s')
-        console_handler.setFormatter(formatter)
-        self.logger.addHandler(console_handler)
+        if is_lambda:
+            # In Lambda, don't add any handler - let messages propagate to AWS root logger
+            # This avoids duplicate logging (our handler to stdout + Lambda capturing stdout)
+            self.logger.propagate = True
+        else:
+            # Not in Lambda - add console handler for local execution
+            self.logger.propagate = False
+            console_handler = logging.StreamHandler()
+            console_handler.setLevel(log_level)
+            formatter = logging.Formatter('[%(levelname)s] %(message)s')
+            console_handler.setFormatter(formatter)
+            self.logger.addHandler(console_handler)
 
         self.logger.info(f"Starting workflow: {workflow_name}")
 
