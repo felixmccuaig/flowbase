@@ -711,7 +711,7 @@ class WorkflowRunner:
             compiler = FeatureCompiler(source_table=source_table)
             sql = compiler.compile(feature_config_dict)
 
-        self.logger.info(f"Generated SQL:\n{sql}")
+        self.logger.debug(f"Generated SQL:\n{sql}")
 
         # Execute feature SQL
         try:
@@ -1099,20 +1099,62 @@ class WorkflowRunner:
 
         self.logger.info(f"Command completed successfully in {duration:.2f}s")
         if result.stdout:
-            self.logger.info(f"stdout: {result.stdout}")
+            self.logger.debug(f"stdout: {result.stdout}")
 
         # Parse output if JSON
         output_data = {}
         if result.stdout.strip():
             try:
                 output_data = json.loads(result.stdout)
-                self.logger.info(f"Parsed JSON output: {output_data}")
+                self.logger.debug(f"Parsed JSON output: {output_data}")
             except json.JSONDecodeError:
                 output_data = {"stdout": result.stdout.strip()}
 
         # Handle output files specified in config
         outputs = {}
         s3_urls = []
+
+        # First check if the command output JSON contains S3 URLs for outputs
+        # (e.g., custom tasks that write directly to S3)
+        for key, value in output_data.items():
+            if isinstance(value, str) and value.startswith('s3://'):
+                # This is an S3 URL - download it to local file system if needed
+                if key.endswith('_path') or key == 'output_path':
+                    # Parse the S3 URL
+                    s3_path = value.replace('s3://', '')
+                    if '/' in s3_path:
+                        parts = s3_path.split('/', 1)
+                        # Skip the bucket, get the key after the prefix
+                        s3_key_full = parts[1] if len(parts) > 1 else ''
+
+                        # Extract the relative path from the key (remove prefix if present)
+                        if self.s3_sync and s3_key_full.startswith(self.s3_sync.prefix):
+                            relative_key = s3_key_full[len(self.s3_sync.prefix):].lstrip('/')
+                        else:
+                            relative_key = s3_key_full
+
+                        # Determine local path
+                        data_root = os.environ.get('FLOWBASE_DATA_ROOT')
+                        if data_root:
+                            local_file = Path(data_root) / relative_key
+                        else:
+                            local_file = project_root / relative_key
+
+                        # Download from S3 if enabled
+                        if self.s3_sync:
+                            self.logger.info(f"Downloading custom task output from S3: {value}")
+                            local_file.parent.mkdir(parents=True, exist_ok=True)
+                            if self.s3_sync.download_file(relative_key, local_file):
+                                outputs[key] = str(local_file)
+                                s3_urls.append(value)
+                                self.logger.info(f"Downloaded to: {local_file}")
+                            else:
+                                self.logger.warning(f"Failed to download from S3: {value}")
+                        else:
+                            # No S3 sync enabled, just record the S3 URL
+                            s3_urls.append(value)
+                            self.logger.warning(f"S3 output found but S3 sync not enabled: {value}")
+
         if config.get('outputs'):
             for output_name, output_path in config['outputs'].items():
                 # Substitute template variables in output path
@@ -1144,7 +1186,9 @@ class WorkflowRunner:
                         else:
                             self.logger.warning(f"Failed to sync output to S3: {output_file}")
                 else:
-                    self.logger.warning(f"Expected output file not found: {output_file}")
+                    # Check if we already downloaded this file from S3
+                    if output_name not in outputs:
+                        self.logger.debug(f"Expected output file not found: {output_file}")
 
         return {
             "type": "custom",
