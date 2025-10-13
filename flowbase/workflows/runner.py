@@ -107,15 +107,21 @@ class WorkflowRunner:
 
     def _setup_logging(self, workflow_name: str) -> None:
         """Set up logging for a workflow run."""
+        import os
+
         timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         self.log_file = self.logs_dir / f"{workflow_name}_{timestamp}.log"
 
+        # Get log level from environment variable, default to INFO
+        log_level_str = os.environ.get('LOG_LEVEL', 'INFO').upper()
+        log_level = getattr(logging, log_level_str, logging.INFO)
+
         # Create logger
         self.logger = logging.getLogger(f"workflow.{workflow_name}")
-        self.logger.setLevel(logging.DEBUG)
+        self.logger.setLevel(logging.DEBUG)  # Set to DEBUG to capture everything
         self.logger.handlers.clear()
 
-        # File handler with detailed formatting
+        # File handler with detailed formatting (always DEBUG for file)
         file_handler = logging.FileHandler(self.log_file)
         file_handler.setLevel(logging.DEBUG)
         formatter = logging.Formatter(
@@ -124,6 +130,12 @@ class WorkflowRunner:
         )
         file_handler.setFormatter(formatter)
         self.logger.addHandler(file_handler)
+
+        # Console handler with configurable level (for Lambda CloudWatch)
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(log_level)
+        console_handler.setFormatter(formatter)
+        self.logger.addHandler(console_handler)
 
         self.logger.info(f"Starting workflow: {workflow_name}")
         self.logger.info(f"Log file: {self.log_file}")
