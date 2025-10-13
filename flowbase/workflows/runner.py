@@ -109,36 +109,28 @@ class WorkflowRunner:
         """Set up logging for a workflow run."""
         import os
 
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        self.log_file = self.logs_dir / f"{workflow_name}_{timestamp}.log"
-
         # Get log level from environment variable, default to INFO
         log_level_str = os.environ.get('LOG_LEVEL', 'INFO').upper()
         log_level = getattr(logging, log_level_str, logging.INFO)
 
         # Create logger
         self.logger = logging.getLogger(f"workflow.{workflow_name}")
-        self.logger.setLevel(logging.DEBUG)  # Set to DEBUG to capture everything
+        self.logger.setLevel(log_level)
         self.logger.handlers.clear()
 
-        # File handler with detailed formatting (always DEBUG for file)
-        file_handler = logging.FileHandler(self.log_file)
-        file_handler.setLevel(logging.DEBUG)
-        formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
-        )
-        file_handler.setFormatter(formatter)
-        self.logger.addHandler(file_handler)
+        # Prevent propagation to avoid duplicate logs in Lambda
+        self.logger.propagate = False
 
-        # Console handler with configurable level (for Lambda CloudWatch)
+        # Single handler that logs to console (captured by Lambda CloudWatch)
         console_handler = logging.StreamHandler()
         console_handler.setLevel(log_level)
+
+        # Simple formatter without timestamp (Lambda adds its own)
+        formatter = logging.Formatter('[%(levelname)s] %(message)s')
         console_handler.setFormatter(formatter)
         self.logger.addHandler(console_handler)
 
         self.logger.info(f"Starting workflow: {workflow_name}")
-        self.logger.info(f"Log file: {self.log_file}")
 
     def load_config(
         self,
