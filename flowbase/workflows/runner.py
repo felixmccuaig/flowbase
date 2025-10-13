@@ -1119,7 +1119,7 @@ class WorkflowRunner:
         for key, value in output_data.items():
             if isinstance(value, str) and value.startswith('s3://'):
                 # This is an S3 URL - download it to local file system if needed
-                if key.endswith('_path') or key == 'output_path':
+                if key == 'output_path':
                     # Parse the S3 URL
                     s3_path = value.replace('s3://', '')
                     if '/' in s3_path:
