@@ -62,18 +62,20 @@ class ModelTrainer:
         df: pd.DataFrame,
         features: List[str],
         target: str,
-        split_config: Dict[str, Any]
+        split_config: Dict[str, Any],
+        model_type: str = "sklearn"
     ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
         """Prepare train/test splits."""
         X = df[features]
         y = df[target]
 
-        # Handle missing values - fill numeric with median, categorical with mode
-        for col in X.columns:
-            if X[col].dtype in ['float64', 'int64']:
-                X[col] = X[col].fillna(X[col].median())
-            else:
-                X[col] = X[col].fillna(X[col].mode()[0] if not X[col].mode().empty else 0)
+        # Handle missing values - xgboost handles NaN natively, others need imputation
+        if model_type != "xgboost":
+            for col in X.columns:
+                if X[col].dtype in ['float64', 'int64']:
+                    X[col] = X[col].fillna(X[col].median())
+                else:
+                    X[col] = X[col].fillna(X[col].mode()[0] if not X[col].mode().empty else 0)
 
         method = split_config.get("method", "random")
 
@@ -95,12 +97,13 @@ class ModelTrainer:
             X_sorted = df_sorted[features]
             y_sorted = df_sorted[target]
 
-            # Handle missing values in sorted data
-            for col in X_sorted.columns:
-                if X_sorted[col].dtype in ['float64', 'int64']:
-                    X_sorted[col] = X_sorted[col].fillna(X_sorted[col].median())
-                else:
-                    X_sorted[col] = X_sorted[col].fillna(X_sorted[col].mode()[0] if not X_sorted[col].mode().empty else 0)
+            # Handle missing values in sorted data - xgboost handles NaN natively
+            if model_type != "xgboost":
+                for col in X_sorted.columns:
+                    if X_sorted[col].dtype in ['float64', 'int64']:
+                        X_sorted[col] = X_sorted[col].fillna(X_sorted[col].median())
+                    else:
+                        X_sorted[col] = X_sorted[col].fillna(X_sorted[col].mode()[0] if not X_sorted[col].mode().empty else 0)
 
             # Use cutoff if provided, otherwise use test_size
             cutoff = split_config.get("cutoff")
@@ -164,8 +167,12 @@ class ModelTrainer:
         # Support both "split" and "train_test_split" keys
         split_config = config.get("train_test_split") or config.get("split", {"method": "random", "test_size": 0.2})
 
+        # Get model type to determine how to handle missing values
+        model_config = config.get("model", config)
+        model_type = model_config.get("type", "sklearn")
+
         X_train, X_test, y_train, y_test = self.prepare_data(
-            df, features, target, split_config
+            df, features, target, split_config, model_type
         )
 
         # Create and train model
@@ -376,14 +383,16 @@ class ModelTrainer:
         # Create DataFrame with correct feature order
         input_df = pd.DataFrame([input_data])[expected_features]
 
-        # Handle missing values same way as training
-        for col in input_df.columns:
-            if input_df[col].dtype in ['float64', 'int64']:
-                if pd.isna(input_df[col].iloc[0]):
-                    input_df[col] = 0  # Default to 0 for inference
-            else:
-                if pd.isna(input_df[col].iloc[0]):
-                    input_df[col] = 0
+        # Handle missing values same way as training - xgboost handles NaN natively
+        model_type = metadata.get("model_type", "sklearn")
+        if model_type != "xgboost":
+            for col in input_df.columns:
+                if input_df[col].dtype in ['float64', 'int64']:
+                    if pd.isna(input_df[col].iloc[0]):
+                        input_df[col] = 0  # Default to 0 for inference
+                else:
+                    if pd.isna(input_df[col].iloc[0]):
+                        input_df[col] = 0
 
         # Make prediction
         prediction = model.predict(input_df)[0]
@@ -454,6 +463,7 @@ class ModelTrainer:
 
         # Make predictions for each row
         results = []
+        model_type = metadata.get("model_type", "sklearn")
         for _, row in result_df.iterrows():
             # Extract feature values
             feature_values = {feat: row[feat] for feat in expected_features}
@@ -461,14 +471,15 @@ class ModelTrainer:
             # Create DataFrame with correct feature order
             input_df = pd.DataFrame([feature_values])[expected_features]
 
-            # Handle missing values same way as training
-            for col in input_df.columns:
-                if input_df[col].dtype in ['float64', 'int64']:
-                    if pd.isna(input_df[col].iloc[0]):
-                        input_df[col] = 0  # Default to 0 for inference
-                else:
-                    if pd.isna(input_df[col].iloc[0]):
-                        input_df[col] = 0
+            # Handle missing values same way as training - xgboost handles NaN natively
+            if model_type != "xgboost":
+                for col in input_df.columns:
+                    if input_df[col].dtype in ['float64', 'int64']:
+                        if pd.isna(input_df[col].iloc[0]):
+                            input_df[col] = 0  # Default to 0 for inference
+                    else:
+                        if pd.isna(input_df[col].iloc[0]):
+                            input_df[col] = 0
 
             # Make prediction
             prediction = model.predict(input_df)[0]
