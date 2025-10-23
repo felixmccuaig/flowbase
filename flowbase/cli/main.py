@@ -479,6 +479,7 @@ def model_train(config_file: str, features: str, output: str) -> None:
 
         s3_bucket = None
         s3_prefix = ""
+        query_engine_config = None
 
         if flowbase_config_path.exists():
             with open(flowbase_config_path, 'r') as f:
@@ -493,12 +494,16 @@ def model_train(config_file: str, features: str, output: str) -> None:
                     if s3_bucket:
                         console.print(f"[dim]S3 sync enabled:[/dim] s3://{s3_bucket}/{s3_prefix}")
 
+            # Get query engine config
+            query_engine_config = project_config.get("query_engine_config")
+
         # Train
         models_dir = output or "data/models"
         trainer = ModelTrainer(
             models_dir=models_dir,
             s3_bucket=s3_bucket,
-            s3_prefix=s3_prefix
+            s3_prefix=s3_prefix,
+            query_engine_config=query_engine_config
         )
 
         with console.status("[bold blue]Training..."):

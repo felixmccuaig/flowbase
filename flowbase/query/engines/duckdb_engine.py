@@ -12,25 +12,48 @@ from flowbase.query.base import QueryEngine
 class DuckDBEngine(QueryEngine):
     """DuckDB-based query engine for local and S3 data."""
 
-    def __init__(self, database: Optional[Union[str, Path]] = None, read_only: bool = False):
+    def __init__(
+        self,
+        database: Optional[Union[str, Path]] = None,
+        read_only: bool = False,
+        config: Optional[Dict[str, Any]] = None,
+    ):
         """
         Initialize DuckDB query engine.
 
         Args:
             database: Path to DuckDB database file. Use None for in-memory.
             read_only: Open database in read-only mode
+            config: Optional configuration dict with keys:
+                - memory_limit: Memory limit as string (e.g., '16GB', '512MB'). Default: '16GB'
+                - threads: Number of threads to use. Default: all available CPU cores
+                - temp_directory: Temporary directory for DuckDB. Default: auto
         """
         self.database = str(database) if database else ":memory:"
         self.read_only = read_only
         self.conn = duckdb.connect(self.database, read_only=read_only)
+        self.config = config or {}
 
         # Configure for better performance
         try:
             import os
-            # Use all available cores, but ensure at least 1
-            threads = max(1, os.cpu_count() or 1)
+
+            # Configure threads
+            config_threads = self.config.get("threads")
+            if config_threads is not None:
+                threads = int(config_threads)
+            else:
+                threads = max(1, os.cpu_count() or 1)
             self.conn.execute(f"SET threads TO {threads}")
-            self.conn.execute("SET memory_limit = '16GB'")
+
+            # Configure memory limit
+            memory_limit = self.config.get("memory_limit", "16GB")
+            self.conn.execute(f"SET memory_limit = '{memory_limit}'")
+
+            # Configure temp directory if provided
+            temp_directory = self.config.get("temp_directory")
+            if temp_directory:
+                self.conn.execute(f"SET temp_directory = '{temp_directory}'")
 
             # Set home directory for DuckDB extensions (needed for Lambda)
             # Check if we're in a Lambda environment or if FLOWBASE_DATA_ROOT is set

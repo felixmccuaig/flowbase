@@ -21,7 +21,8 @@ class ModelTrainer:
         models_dir: str = "data/models",
         s3_bucket: Optional[str] = None,
         s3_prefix: Optional[str] = "",
-        data_root: Optional[str] = None
+        data_root: Optional[str] = None,
+        query_engine_config: Optional[Dict[str, Any]] = None
     ):
         """Initialize trainer.
 
@@ -30,6 +31,7 @@ class ModelTrainer:
             s3_bucket: Optional S3 bucket for syncing artifacts
             s3_prefix: Optional S3 prefix (e.g., "flowbase-greyhounds/")
             data_root: Optional root directory for Lambda /tmp support
+            query_engine_config: Optional DuckDB configuration dict
         """
         # If data_root is provided and models_dir is relative, prepend data_root
         models_path = Path(models_dir)
@@ -43,6 +45,7 @@ class ModelTrainer:
         self.s3_bucket = s3_bucket
         self.s3_prefix = s3_prefix
         self.s3_sync = None
+        self.query_engine_config = query_engine_config
 
         if s3_bucket:
             try:
@@ -450,7 +453,7 @@ class ModelTrainer:
         """
 
         # Execute query
-        engine = DuckDBEngine()
+        engine = DuckDBEngine(config=self.query_engine_config)
         result_df = engine.execute(sql)
 
         if result_df.empty:

@@ -641,8 +641,11 @@ class WorkflowRunner:
         # Load project config and initialize S3 sync if enabled
         self._load_project_config(project_root)
 
-        # Initialize DuckDB engine
-        engine = DuckDBEngine()
+        # Initialize DuckDB engine with config
+        query_engine_config = None
+        if self.project_config:
+            query_engine_config = self.project_config.get("query_engine_config")
+        engine = DuckDBEngine(config=query_engine_config)
 
         # Resolve and load dependencies
         self.logger.info(f"Resolving data dependencies for features")
