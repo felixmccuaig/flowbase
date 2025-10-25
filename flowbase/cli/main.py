@@ -1452,36 +1452,5 @@ def query(database: str, dataset: tuple, features: tuple, execute: str) -> None:
         sys.exit(1)
 
 
-@cli.command()
-@click.option("--port", default=8501, help="Port to run the UI on")
-@click.option("--mode", default="ide", type=click.Choice(["ide", "ml", "explore", "features"]), help="UI mode")
-def ui(port: int, mode: str) -> None:
-    """Launch the Flowbase UI."""
-    import subprocess
-
-    ui_mapping = {
-        "ide": ("flowbase/ui/ide.py", "IDE"),
-        "ml": ("flowbase/ui/ml_app.py", "ML Studio"),
-        "explore": ("flowbase/ui/explorer.py", "Data Explorer"),
-        "features": ("flowbase/ui/feature_sets.py", "Feature Sets")
-    }
-
-    ui_file, ui_name = ui_mapping[mode]
-
-    console.print(f"[blue]Launching Flowbase {ui_name} on port {port}...[/blue]")
-    console.print(f"[dim]Navigate to http://localhost:{port}[/dim]\n")
-
-    try:
-        subprocess.run(
-            ["streamlit", "run", ui_file, "--server.port", str(port)],
-            check=True
-        )
-    except KeyboardInterrupt:
-        console.print("\n[yellow]UI stopped[/yellow]")
-    except Exception as e:
-        console.print(f"[red]Failed to start UI: {e}[/red]")
-        sys.exit(1)
-
-
 if __name__ == "__main__":
     cli()

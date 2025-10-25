@@ -41,9 +41,6 @@ cloud = [
     "boto3>=1.28.0",
     "trino>=0.328.0",
 ]
-ui = [
-    "streamlit>=1.28.0",
-]
 
 [project.scripts]
 flowbase = "flowbase.cli.main:cli"
