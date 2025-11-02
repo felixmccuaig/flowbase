@@ -69,7 +69,7 @@ class ModelTrainer:
         model_type: str = "sklearn"
     ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
         """Prepare train/test splits."""
-        X = df[features]
+        X = df[features].copy()
         y = df[target]
 
         # Handle missing values - xgboost handles NaN natively, others need imputation
@@ -79,6 +79,11 @@ class ModelTrainer:
                     X[col] = X[col].fillna(X[col].median())
                 else:
                     X[col] = X[col].fillna(X[col].mode()[0] if not X[col].mode().empty else 0)
+        else:
+            # For XGBoost, convert object columns to categorical for enable_categorical support
+            for col in X.columns:
+                if X[col].dtype == 'object':
+                    X[col] = X[col].astype('category')
 
         method = split_config.get("method", "random")
 
@@ -178,6 +183,13 @@ class ModelTrainer:
             df, features, target, split_config, model_type
         )
 
+        # For XGBoost with categorical columns, ensure they're properly typed after split
+        if model_type == "xgboost":
+            for col in X_train.columns:
+                if X_train[col].dtype == 'object':
+                    X_train[col] = X_train[col].astype('category')
+                    X_test[col] = X_test[col].astype('category')
+
         # Create and train model
         # Config might already be unwrapped by CLI
         model_config = config.get("model", config)
@@ -237,8 +249,29 @@ class ModelTrainer:
             # Generate confusion matrix
             confusion_mat = confusion_matrix(y_test, y_pred).tolist()
 
-        # Save model
+        # Save test set with predictions
         model_name = config["name"]
+        test_dir = self.models_dir.parent / "test"
+        test_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create test dataframe with predictions
+        test_output = pd.DataFrame(X_test).copy()
+        test_output[f"{target}_actual"] = y_test.values
+        test_output[f"{target}_pred"] = y_pred
+
+        # Add probabilities if available
+        if hasattr(model, "predict_proba"):
+            if not is_regression:
+                # For classification, get probability of positive class
+                y_pred_proba = model.predict_proba(X_test)
+                test_output[f"{target}_pred_proba"] = y_pred_proba[:, 1]
+
+        # Save to parquet
+        test_output_path = test_dir / f"{model_name}_test.parquet"
+        test_output.to_parquet(test_output_path)
+        logger.info(f"Test set saved to {test_output_path}")
+
+        # Save model
         model_path = self.models_dir / f"{model_name}.pkl"
         with open(model_path, "wb") as f:
             pickle.dump(model, f)
@@ -314,6 +347,7 @@ class ModelTrainer:
         return {
             "model_path": str(model_path),
             "metadata_path": str(metadata_path),
+            "test_output_path": str(test_output_path),
             "s3_url": s3_url if s3_url else None,
             "metrics": metrics,
             "train_size": len(X_train),

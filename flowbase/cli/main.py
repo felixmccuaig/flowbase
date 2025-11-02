@@ -519,6 +519,7 @@ def model_train(config_file: str, features: str, output: str) -> None:
 
         console.print(f"\n[dim]Model saved to:[/dim] {result['model_path']}")
         console.print(f"[dim]Metadata saved to:[/dim] {result['metadata_path']}")
+        console.print(f"[dim]Test set saved to:[/dim] {result.get('test_output_path', 'N/A')}")
 
         if result.get('s3_url'):
             console.print(f"[green]✓[/green] Synced to S3")
