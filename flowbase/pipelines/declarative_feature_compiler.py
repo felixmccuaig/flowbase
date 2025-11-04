@@ -36,7 +36,7 @@ class DeclarativeFeatureCompiler:
         self.time_column = time_column
         self.source_table = source_table
 
-    def compile(self, config: Dict[str, Any]) -> str:
+    def compile(self, config: Dict[str, Any], predicate: Optional[str] = None) -> str:
         """
         Compile feature config to SQL with multi-pass support.
 
@@ -46,6 +46,7 @@ class DeclarativeFeatureCompiler:
 
         Args:
             config: Feature configuration dict
+            predicate: Optional WHERE clause predicate to filter rows
 
         Returns:
             SQL query string
@@ -62,12 +63,12 @@ class DeclarativeFeatureCompiler:
 
         # If only one pass, use simple SELECT (backward compatible)
         if len(features_by_pass) == 1 and 1 in features_by_pass:
-            return self._compile_single_pass(features_by_pass[1])
+            return self._compile_single_pass(features_by_pass[1], predicate=predicate)
 
         # Multi-pass compilation using CTEs
-        return self._compile_multi_pass(features_by_pass)
+        return self._compile_multi_pass(features_by_pass, predicate=predicate)
 
-    def _compile_single_pass(self, features: List[Dict[str, Any]]) -> str:
+    def _compile_single_pass(self, features: List[Dict[str, Any]], predicate: Optional[str] = None) -> str:
         """Compile features in a single SELECT statement."""
         select_parts = ["*"]  # Include all base columns
 
@@ -76,9 +77,12 @@ class DeclarativeFeatureCompiler:
             if feature_sql:
                 select_parts.append(f"    {feature_sql}")
 
-        return f"SELECT\n{',\n'.join(select_parts)}\nFROM {self.source_table}"
+        sql = f"SELECT\n{',\n'.join(select_parts)}\nFROM {self.source_table}"
+        if predicate:
+            sql += f"\nWHERE {predicate}"
+        return sql
 
-    def _compile_multi_pass(self, features_by_pass: Dict[int, List[Dict[str, Any]]]) -> str:
+    def _compile_multi_pass(self, features_by_pass: Dict[int, List[Dict[str, Any]]], predicate: Optional[str] = None) -> str:
         """
         Compile features with multiple passes using CTEs.
 
@@ -102,12 +106,19 @@ class DeclarativeFeatureCompiler:
             # Create CTE for this pass (except the last one)
             if not is_last_pass:
                 cte_name = f"pass_{pass_num}_features"
-                cte_sql = f"{cte_name} AS (\n  SELECT\n  {',\n  '.join(select_parts)}\n  FROM {current_table}\n)"
+                where_clause = ""
+                # Apply predicate only to the first pass
+                if predicate and i == 0:
+                    where_clause = f"\n  WHERE {predicate}"
+                cte_sql = f"{cte_name} AS (\n  SELECT\n  {',\n  '.join(select_parts)}\n  FROM {current_table}{where_clause}\n)"
                 ctes.append(cte_sql)
                 current_table = cte_name
             else:
                 # Last pass becomes the main SELECT
                 final_select = f"SELECT\n{',\n'.join(select_parts)}\nFROM {current_table}"
+                # Apply predicate to final select if this is the only pass
+                if predicate and i == 0:
+                    final_select += f"\nWHERE {predicate}"
 
         # Combine CTEs and final SELECT
         if ctes:

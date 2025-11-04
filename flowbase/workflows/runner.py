@@ -55,6 +55,7 @@ class WorkflowTask:
     depends_on: List[str]
     params: Dict[str, Any]
     condition: Optional[str] = None
+    predicate: Optional[str] = None
 
 
 class WorkflowRunner:
@@ -361,6 +362,7 @@ class WorkflowRunner:
 
             params = entry.get("params", {})
             condition = entry.get("condition")
+            predicate = entry.get("predicate")
 
             tasks.append(WorkflowTask(
                 name=str(name),
@@ -369,6 +371,7 @@ class WorkflowRunner:
                 depends_on=list(depends_on),
                 params=params,
                 condition=condition,
+                predicate=predicate,
             ))
 
         return tasks
@@ -694,6 +697,12 @@ class WorkflowRunner:
         # Convert feature config to dict for compiler
         feature_config_dict = self._feature_config_to_dict(feature_dep.config)
 
+        # Substitute template variables in predicate if provided
+        predicate = None
+        if task.predicate:
+            predicate = self._substitute_templates(task.predicate, template_vars)
+            self.logger.info(f"Applying predicate: {predicate}")
+
         # Determine which compiler to use based on feature config format
         # If features have 'type' field, use declarative compiler
         # Otherwise use expression-based compiler
@@ -716,7 +725,7 @@ class WorkflowRunner:
                 time_column=time_column,
                 source_table=source_table
             )
-            sql = compiler.compile(feature_config_dict)
+            sql = compiler.compile(feature_config_dict, predicate=predicate)
         else:
             self.logger.info(f"Using expression-based compiler with source table: {source_table}")
             compiler = FeatureCompiler(source_table=source_table)
@@ -1242,6 +1251,7 @@ class WorkflowRunner:
             "depends_on": task.depends_on,
             "params": task.params,
             "condition": task.condition,
+            "predicate": task.predicate,
         }
 
     def _result_to_dict(self, result: TaskResult) -> Dict[str, Any]:
