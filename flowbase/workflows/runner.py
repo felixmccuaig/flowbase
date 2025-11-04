@@ -479,7 +479,7 @@ class WorkflowRunner:
             if task.task_type == TaskType.SCRAPER:
                 output = self._run_scraper(task, config_dir, all_params)
             elif task.task_type == TaskType.FEATURES:
-                output = self._run_features(task, config_dir, all_params)
+                output = self._run_features(task, config_dir, all_params, template_vars)
             elif task.task_type == TaskType.INFERENCE:
                 output = self._run_inference(task, config_dir, all_params)
             elif task.task_type == TaskType.CUSTOM:
@@ -615,7 +615,8 @@ class WorkflowRunner:
         self,
         task: WorkflowTask,
         config_dir: Path,
-        params: Dict[str, Any]
+        params: Dict[str, Any],
+        template_vars: Dict[str, Any]
     ) -> Dict[str, Any]:
         """Run a feature generation task."""
         import yaml
