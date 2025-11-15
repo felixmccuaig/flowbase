@@ -362,28 +362,8 @@ class RollupRunner:
 
     def _matches_glob_pattern(self, path_obj: Path, pattern: str) -> bool:
         """Check if a path matches a glob pattern with ** support."""
-        # Convert glob pattern to a more manageable form
-        # This is a simplified implementation
-
-        if "**" not in pattern:
-            return path_obj.match(pattern)
-
-        # Split pattern by **
-        parts = pattern.split("**")
-        if len(parts) != 2:
-            return False
-
-        prefix, suffix = parts
-
-        # Check prefix match
-        if prefix and not str(path_obj).startswith(prefix.rstrip("*")):
-            return False
-
-        # Check suffix match
-        if suffix and not str(path_obj).endswith(suffix.lstrip("*")):
-            return False
-
-        return True
+        # Use pathlib's built-in glob matching which properly supports **
+        return path_obj.match(pattern)
 
     def _combine_files(self, file_list: List[Path], input_format: str) -> List[Dict[str, Any]]:
         """Combine multiple files into a single data structure."""

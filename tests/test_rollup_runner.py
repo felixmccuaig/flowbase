@@ -518,6 +518,59 @@ class TestRollupRunnerHierarchical:
         assert "error" in result
         assert "unknown_stage" in result["error"]
 
+    def test_recursive_glob_pattern_matching(self, temp_dir, s3_mock):
+        """Test that **/*.gz pattern correctly matches files in subdirectories (simulates hourly data structure)."""
+        # Create test files in subdirectories (simulating time-based partitioning)
+        test_files = []
+
+        # Create files in different subdirectories
+        for hour in ["00", "01", "02"]:
+            subdir = temp_dir / hour
+            subdir.mkdir(exist_ok=True)
+
+            file_path = subdir / f"data-stream-1-2025-11-15-{hour}-test.gz"
+            with gzip.open(file_path, 'wt') as f:
+                f.write('{"id": "test_record", "hour": "' + hour + '", "value": 1}\n')
+            test_files.append(file_path)
+
+            # Upload to S3 with the expected structure
+            s3_key = f"data/2025/11/15/{hour}/data-stream-1-2025-11-15-{hour}-test.gz"
+            s3_mock.upload_file(str(file_path), 'test-bucket', s3_key)
+
+        # Test the rollup with **/*.gz pattern
+        config = {
+            "rollup_type": "hierarchical",
+            "stage": "daily",
+            "source": {
+                "bucket": "test-bucket",
+                "prefix": "data/2025/11/15/",
+                "pattern": "**/*.gz",  # This should now work with the fixed glob matching
+                "format": "jsonl",
+                "compression": "gzip"
+            },
+            "target": {
+                "bucket": "test-bucket",
+                "key": "data/processed/daily/data_2025_11_15.parquet",
+                "format": "parquet"
+            }
+        }
+
+        runner = RollupRunner(s3_bucket='test-bucket')
+        result = runner.run(config_path=None, config_dict=config)
+
+        # Verify the rollup found and processed all 3 files
+        assert result["source_files"] == 3
+        assert result["rows_processed"] == 3
+        assert result["stage"] == "daily"
+
+        # Verify output file contains data from all hours
+        response = s3_mock.get_object(Bucket='test-bucket', Key='data/processed/daily/data_2025_11_15.parquet')
+        output_df = pd.read_parquet(io.BytesIO(response['Body'].read()))
+
+        assert len(output_df) == 3
+        assert set(output_df['hour']) == {"00", "01", "02"}
+        assert all(output_df['id'] == 'test_record')
+
 
 class TestRollupRunnerErrorHandling:
     """Test error handling in rollup operations."""
@@ -603,7 +656,7 @@ class TestRollupRunnerIntegration:
     """Integration tests for complete rollup workflows."""
 
     def test_end_to_end_workflow_simulation(self, temp_dir, s3_mock):
-        """Test a complete rollup workflow simulation."""
+        """Test a complete rollup workflow simulation with multiple hourly files."""
         # Simulate a full day's worth of hourly files
         total_files = 24
         records_per_file = 100
@@ -619,11 +672,11 @@ class TestRollupRunnerIntegration:
                         "timestamp": f"2025-01-15T{hour:02d}:{record % 60:02d}:{record // 60:02d}Z",
                         "hour": hour,
                         "value": hour * records_per_file + record,
-                        "source": "trade_data"
+                        "source": "test_data"
                     }
                     f.write(json.dumps(data) + '\n')
 
-            s3_mock.upload_file(str(file_path), 'test-bucket', f"trades/2025/01/15/data_{hour:02d}.jsonl")
+            s3_mock.upload_file(str(file_path), 'test-bucket', f"data/2025/01/15/data_{hour:02d}.jsonl")
 
         # Run daily rollup
         config = {
@@ -631,7 +684,7 @@ class TestRollupRunnerIntegration:
             "stage": "daily",
             "source": {
                 "bucket": "test-bucket",
-                "prefix": "trades/{{ year }}/{{ month }}/{{ day }}/",
+                "prefix": "data/{{ year }}/{{ month }}/{{ day }}/",
                 "pattern": "*.jsonl",
                 "format": "jsonl"
             },
@@ -672,7 +725,7 @@ class TestRollupRunnerIntegration:
 
         assert len(output_df) == total_records
         assert set(output_df['hour']) == set(range(24))
-        assert all(output_df['source'] == 'trade_data')
+        assert all(output_df['source'] == 'test_data')
 
         # Verify data integrity - all IDs should be unique
         assert len(output_df['id'].unique()) == total_records
