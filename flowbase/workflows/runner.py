@@ -21,6 +21,7 @@ class TaskType(str, Enum):
     FEATURES = "features"
     INFERENCE = "inference"
     CUSTOM = "custom"
+    ROLLUP = "rollup"
 
 
 class TaskStatus(str, Enum):
@@ -484,6 +485,8 @@ class WorkflowRunner:
                 output = self._run_inference(task, config_dir, all_params)
             elif task.task_type == TaskType.CUSTOM:
                 output = self._run_custom(task, config_dir, all_params)
+            elif task.task_type == TaskType.ROLLUP:
+                output = self._run_rollup(task, config_dir, all_params)
             else:
                 raise ValueError(f"Unsupported task type: {task.task_type}")
 
@@ -1220,6 +1223,57 @@ class WorkflowRunner:
             "s3_urls": s3_urls if s3_urls else None,
             **output_data
         }
+
+    def _run_rollup(
+        self,
+        task: WorkflowTask,
+        config_dir: Path,
+        params: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Run a rollup task."""
+        from flowbase.rollup.runner import RollupRunner
+
+        # Resolve config path relative to project root
+        config_path = self._resolve_task_config_path(task.config, config_dir)
+
+        # Find project root and load config for S3 sync
+        search_dir = Path(config_path).parent.resolve()
+        project_root = None
+        while search_dir != search_dir.parent:
+            if (search_dir / "data").exists() or (search_dir / "models").exists():
+                project_root = search_dir
+                break
+            search_dir = search_dir.parent
+
+        if not project_root:
+            project_root = Path(config_path).parent.parent
+
+        # Load project config if not already loaded
+        if not self.project_config:
+            self._load_project_config(project_root)
+
+        # Get S3 configuration from project config
+        s3_bucket = None
+        s3_prefix = ""
+        if self.project_config:
+            storage_config = self.project_config.get('storage', {})
+            if isinstance(storage_config, dict):
+                s3_bucket = storage_config.get('bucket')
+                s3_prefix = storage_config.get('prefix', '')
+
+        # Check for environment variables (Lambda support)
+        import os
+        data_root = os.environ.get('FLOWBASE_DATA_ROOT')
+
+        # Initialize rollup runner
+        runner = RollupRunner(
+            s3_bucket=s3_bucket,
+            s3_prefix=s3_prefix,
+            data_root=data_root
+        )
+
+        # Execute rollup
+        return runner.run(config_path, params=params)
 
     def _resolve_task_config_path(self, config_path: str, workflow_dir: Path) -> str:
         """Resolve task config path relative to project root."""
