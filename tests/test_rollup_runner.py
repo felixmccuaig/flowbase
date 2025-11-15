@@ -568,7 +568,8 @@ class TestRollupRunnerHierarchical:
         output_df = pd.read_parquet(io.BytesIO(response['Body'].read()))
 
         assert len(output_df) == 3
-        assert set(output_df['hour']) == {"00", "01", "02"}
+        # The hour column should now be properly converted to integers due to the NaN cleaning fix
+        assert set(output_df['hour']) == {0, 1, 2}
         assert all(output_df['id'] == 'test_record')
 
 
@@ -650,6 +651,69 @@ class TestRollupRunnerErrorHandling:
         # Should raise an exception for S3 access issues
         with pytest.raises(Exception):  # Could be ClientError or other S3-related exception
             runner.run(config_path=None, config_dict=config)
+
+    def test_nan_string_conversion_error(self, temp_dir, s3_mock):
+        """Test handling of 'NaN' strings in numeric columns during rollup."""
+        # Create JSONL files with 'NaN' strings in numeric columns
+        # JSONL format doesn't auto-convert 'NaN' strings like CSV does
+        files = []
+        for i in range(2):
+            file_path = temp_dir / f"test_data_{i}.jsonl"
+            with open(file_path, 'w') as f:
+                # Mix valid numeric values with string 'NaN'
+                records = [
+                    {"id": f"record_{i}_1", "bsp_price": 1.5, "other_col": "value1"},
+                    {"id": f"record_{i}_2", "bsp_price": "NaN", "other_col": "value2"},  # String NaN
+                    {"id": f"record_{i}_3", "bsp_price": 2.3, "other_col": "value3"},
+                ]
+                for record in records:
+                    f.write(json.dumps(record) + '\n')
+
+            files.append(file_path)
+            # Upload to mock S3
+            s3_mock.upload_file(str(file_path), 'test-bucket', f"source/{file_path.name}")
+
+        config = {
+            "rollup_type": "simple",
+            "source": {
+                "bucket": "test-bucket",
+                "prefix": "source/",
+                "pattern": "*.jsonl",
+                "format": "jsonl"
+            },
+            "target": {
+                "bucket": "test-bucket",
+                "key": "target/rollup.parquet",
+                "format": "parquet"
+            }
+        }
+
+        runner = RollupRunner(s3_bucket='test-bucket')
+
+        # Test that the fix works - rollup should succeed with string 'NaN' values
+        result = runner.run(config_path=None, config_dict=config)
+
+        # Verify the rollup succeeded
+        assert result["source_files"] == 2
+        assert result["rows_processed"] == 6  # 3 records per file * 2 files
+
+        # Verify output contains proper NaN values
+        response = s3_mock.get_object(Bucket='test-bucket', Key='target/rollup.parquet')
+        output_df = pd.read_parquet(io.BytesIO(response['Body'].read()))
+
+        assert len(output_df) == 6
+        # Check that bsp_price column exists and has the right types
+        assert 'bsp_price' in output_df.columns
+
+        # Check the values - string 'NaN' should be converted to proper pandas NaN
+        bsp_values = output_df['bsp_price'].tolist()
+        # Should have [1.5, NaN, 2.3, 1.5, NaN, 2.3]
+        assert bsp_values[0] == 1.5  # record_0_1
+        assert pd.isna(bsp_values[1])  # record_0_2 (was "NaN")
+        assert bsp_values[2] == 2.3  # record_0_3
+        assert bsp_values[3] == 1.5  # record_1_1
+        assert pd.isna(bsp_values[4])  # record_1_2 (was "NaN")
+        assert bsp_values[5] == 2.3  # record_1_3
 
 
 class TestRollupRunnerIntegration:

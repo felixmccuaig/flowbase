@@ -168,6 +168,9 @@ class RollupRunner:
             # Convert to DataFrame
             df = pd.DataFrame(combined_data)
 
+            # Clean DataFrame to handle string 'NaN' values and type conversion issues
+            df = self._clean_dataframe_for_output(df)
+
             # Write combined data to target format
             logger.info(f"Writing combined data ({len(df)} rows) to {output_format} format")
             final_temp_file = self._write_output_file(df, target_temp_file, output_format, compression)
@@ -430,6 +433,37 @@ class RollupRunner:
             final_file = compressed_file
 
         return final_file
+
+    def _clean_dataframe_for_output(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Clean DataFrame to handle string 'NaN' values and type conversion issues.
+
+        This method ensures that string representations of NaN are converted to proper
+        pandas NaN values, and attempts to convert columns to appropriate numeric types
+        where possible, making the rollup more fault-tolerant.
+        """
+        # Replace common string representations of NaN with proper pandas NaN
+        df = df.replace(['NaN', 'nan', 'null', 'NULL', 'None', ''], pd.NA)
+
+        # Try to convert object columns to numeric types where appropriate
+        for col in df.columns:
+            if df[col].dtype == 'object':
+                # Attempt numeric conversion, coercing errors to NaN
+                try:
+                    # Use pd.to_numeric with errors='coerce' to convert invalid values to NaN
+                    numeric_series = pd.to_numeric(df[col], errors='coerce')
+
+                    # Only convert if more than 50% of values are successfully converted to numeric
+                    # This avoids converting columns that are actually meant to be strings
+                    non_na_count = numeric_series.notna().sum()
+                    if non_na_count > len(numeric_series) * 0.5:
+                        df[col] = numeric_series
+                        logger.info(f"Converted column '{col}' to numeric type ({non_na_count}/{len(numeric_series)} values)")
+                    else:
+                        logger.debug(f"Kept column '{col}' as object type (only {non_na_count}/{len(numeric_series)} numeric values)")
+                except Exception as e:
+                    logger.debug(f"Could not convert column '{col}' to numeric: {e}")
+
+        return df
 
     def _archive_files(self, file_list: List[str], archive_location: str, params: Dict[str, Any]) -> bool:
         """Archive files to compressed tar.gz in S3."""
