@@ -70,6 +70,30 @@ class PipelineConfig(BaseModel):
     output_path: Optional[str] = Field(None, description="Output path for results")
 
 
+class EvalConfig(BaseModel):
+    """Universal evaluation config for cross-model comparison.
+
+    Enables apples-to-apples comparison between regression and classification
+    models by converting predictions to a common probability space.
+    """
+
+    binary_target: str = Field(
+        ...,
+        description="Binary (0/1) column to evaluate against. "
+                    "For classifiers this is typically the target itself. "
+                    "For regressors, a leakage column (e.g., 'win')."
+    )
+    probability_expression: Optional[str] = Field(
+        default=None,
+        description="DuckDB SQL expression to convert prediction to probability. "
+                    "Uses {prediction} placeholder. If omitted, uses {target}_pred_proba."
+    )
+    group_column: Optional[str] = Field(
+        default=None,
+        description="Column for group-level metrics (e.g., event_id for top-1 accuracy)."
+    )
+
+
 class ModelConfig(BaseModel):
     """Model training configuration."""
 
@@ -93,6 +117,10 @@ class ModelConfig(BaseModel):
         description="Columns excluded from training due to target/temporal leakage. "
                     "Included in test output for post-hoc evaluation."
     )
+    eval: Optional[EvalConfig] = Field(
+        default=None,
+        description="Universal evaluation config for cross-model comparison."
+    )
 
     @model_validator(mode='after')
     def check_leakage_columns(self):
@@ -102,6 +130,16 @@ class ModelConfig(BaseModel):
                 raise ValueError(
                     f"Features contain leakage columns: {sorted(leaked)}. "
                     "These columns must not be used as training features."
+                )
+        return self
+
+    @model_validator(mode='after')
+    def check_eval_config(self):
+        if self.eval and self.eval.binary_target != self.target:
+            if not self.leakage_columns or self.eval.binary_target not in self.leakage_columns:
+                raise ValueError(
+                    f"eval.binary_target '{self.eval.binary_target}' must be the model "
+                    f"target or listed in leakage_columns to be available for evaluation."
                 )
         return self
 

@@ -744,18 +744,73 @@ def eval_compare(model_paths: tuple, name: str) -> None:
         console.print(table)
         console.print(f"\n[bold green]Best model:[/bold green] {best_model} (test_score: {best_score:.4f})")
 
+        # Universal eval metrics table (for cross-model comparison)
+        has_eval = any("eval" in m.get("metrics", {}) for m in models_data)
+        best_eval_model = None
+        best_auc = -1
+
+        if has_eval:
+            console.print()
+            eval_table = Table(title="Universal Evaluation Metrics")
+            eval_table.add_column("Model", style="cyan")
+            eval_table.add_column("Target", style="magenta")
+            eval_table.add_column("AUC-ROC", style="green")
+            eval_table.add_column("Log Loss", style="green")
+            eval_table.add_column("Brier", style="green")
+            eval_table.add_column("Top-1 Acc", style="green")
+            eval_table.add_column("Group LL", style="green")
+
+            for model in models_data:
+                eval_m = model.get("metrics", {}).get("eval")
+                if eval_m:
+                    auc = eval_m.get("auc_roc", 0)
+                    if isinstance(auc, (int, float)) and auc > best_auc:
+                        best_auc = auc
+                        best_eval_model = model["name"]
+
+                    def _fmt(val):
+                        return f"{val:.4f}" if isinstance(val, (int, float)) else "N/A"
+
+                    eval_table.add_row(
+                        model["name"],
+                        model.get("target", ""),
+                        _fmt(eval_m.get("auc_roc")),
+                        _fmt(eval_m.get("log_loss")),
+                        _fmt(eval_m.get("brier_score")),
+                        _fmt(eval_m.get("top_1_accuracy")),
+                        _fmt(eval_m.get("group_log_loss")),
+                    )
+                else:
+                    eval_table.add_row(
+                        model["name"],
+                        model.get("target", ""),
+                        *["N/A"] * 5
+                    )
+
+            console.print(eval_table)
+            if best_eval_model:
+                console.print(
+                    f"\n[bold green]Best model (AUC-ROC):[/bold green] "
+                    f"{best_eval_model} ({best_auc:.4f})"
+                )
+
         # Save comparison results
         comparison_dir = Path("data/evals")
         comparison_dir.mkdir(parents=True, exist_ok=True)
 
+        comparison_data = {
+            "name": eval_name,
+            "models": models_data,
+            "best_model": best_model,
+            "best_score": best_score
+        }
+        if has_eval and best_eval_model:
+            comparison_data["best_eval_model"] = best_eval_model
+            comparison_data["best_eval_auc_roc"] = best_auc
+
         comparison_path = comparison_dir / f"{eval_name}.json"
         with open(comparison_path, 'w') as f:
-            json.dump({
-                "name": eval_name,
-                "models": models_data,
-                "best_model": best_model,
-                "best_score": best_score
-            }, f, indent=2)
+            json.dump(comparison_data, f, indent=2)
 
         console.print(f"\n[dim]Comparison saved to:[/dim] {comparison_path}")
 

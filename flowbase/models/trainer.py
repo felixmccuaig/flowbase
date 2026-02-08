@@ -291,6 +291,148 @@ class ModelTrainer:
             "group_count": int(len(valid_groups))
         }
 
+    def _apply_probability_expression(
+        self,
+        y_pred: np.ndarray,
+        expression: str,
+        target: str,
+    ) -> np.ndarray:
+        """Apply a DuckDB SQL expression to convert predictions to probabilities.
+
+        Uses the same DuckDB pattern as InferenceRunner._apply_post_processing().
+        """
+        import duckdb
+
+        conn = duckdb.connect(":memory:")
+        pred_df = pd.DataFrame({"prediction": y_pred.astype(float)})
+        conn.register("predictions", pred_df)
+
+        sql_expr = expression.replace("{prediction}", "prediction")
+        sql = f"SELECT ({sql_expr}) AS prob FROM predictions"
+
+        result = conn.execute(sql).fetchdf()
+        conn.close()
+
+        return result["prob"].values
+
+    def _compute_eval_metrics(
+        self,
+        df: pd.DataFrame,
+        X_test: pd.DataFrame,
+        y_pred: np.ndarray,
+        test_output: pd.DataFrame,
+        eval_config: Dict[str, Any],
+        target: str,
+        is_regression: bool,
+        model: Any,
+        group_column: Optional[str] = None,
+        test_df: Optional[pd.DataFrame] = None,
+    ) -> Dict[str, float]:
+        """Compute universal evaluation metrics for cross-model comparison.
+
+        Converts predictions to probabilities and evaluates against a binary target,
+        enabling apples-to-apples comparison between regression and classification models.
+        """
+        from sklearn.metrics import roc_auc_score, log_loss, brier_score_loss
+
+        binary_target_name = eval_config["binary_target"]
+
+        # Resolve binary target values
+        if binary_target_name == target:
+            y_binary = test_output[f"{target}_actual"].values
+        elif binary_target_name in test_output.columns:
+            y_binary = test_output[binary_target_name].values
+        elif group_column and test_df is not None and binary_target_name in test_df.columns:
+            y_binary = test_df[binary_target_name].values
+        elif binary_target_name in df.columns:
+            y_binary = df.loc[X_test.index, binary_target_name].values
+        else:
+            logger.warning(f"eval.binary_target '{binary_target_name}' not found, skipping eval metrics")
+            return {}
+
+        # Derive probabilities
+        probability_expression = eval_config.get("probability_expression")
+        if probability_expression:
+            probabilities = self._apply_probability_expression(
+                y_pred, probability_expression, target
+            )
+        else:
+            proba_col = f"{target}_pred_proba"
+            if proba_col in test_output.columns:
+                probabilities = test_output[proba_col].values
+            else:
+                logger.warning(
+                    f"No probability_expression and no {proba_col} column found, "
+                    "skipping eval metrics"
+                )
+                return {}
+
+        # Build working arrays, drop NaN rows
+        y_binary = pd.to_numeric(y_binary, errors="coerce")
+        probabilities = pd.to_numeric(probabilities, errors="coerce")
+        mask = ~(np.isnan(y_binary) | np.isnan(probabilities))
+        nan_count = (~mask).sum()
+        if nan_count > 0:
+            logger.warning(f"Dropping {nan_count} rows with NaN values for eval metrics")
+        y_binary = y_binary[mask].astype(int)
+        probabilities = probabilities[mask]
+
+        if len(y_binary) == 0:
+            logger.warning("No valid rows for eval metrics after NaN removal")
+            return {}
+
+        # Clip probabilities for numerical stability
+        probabilities = np.clip(probabilities, 1e-15, 1 - 1e-15)
+
+        eval_metrics = {
+            "auc_roc": float(roc_auc_score(y_binary, probabilities)),
+            "log_loss": float(log_loss(y_binary, probabilities)),
+            "brier_score": float(brier_score_loss(y_binary, probabilities)),
+        }
+
+        # Group-level metrics
+        eval_group_col = eval_config.get("group_column")
+        if eval_group_col:
+            # Resolve group column values
+            if eval_group_col in test_output.columns:
+                group_values = test_output[eval_group_col].values
+            elif group_column and test_df is not None and eval_group_col in test_df.columns:
+                group_values = test_df[eval_group_col].values
+            elif eval_group_col in df.columns:
+                group_values = df.loc[X_test.index, eval_group_col].values
+            else:
+                logger.warning(f"eval.group_column '{eval_group_col}' not found, skipping group metrics")
+                return eval_metrics
+
+            # Apply same NaN mask
+            group_values = group_values[mask]
+
+            work = pd.DataFrame({
+                "group": group_values,
+                "prob": probabilities,
+                "actual": y_binary,
+            })
+
+            # Top-1 accuracy: highest-prob runner in each group is the winner
+            pred_winner_idx = work.groupby("group")["prob"].idxmax()
+            top1_correct = work.loc[pred_winner_idx, "actual"].sum()
+            n_groups = work["group"].nunique()
+            eval_metrics["top_1_accuracy"] = float(top1_correct / n_groups) if n_groups > 0 else 0.0
+
+            # Group log loss: -log(prob assigned to actual winner), only groups with 1 winner
+            group_wins = work.groupby("group")["actual"].sum()
+            valid_groups = group_wins[group_wins == 1].index
+            if len(valid_groups) > 0:
+                valid_winners = work[(work["group"].isin(valid_groups)) & (work["actual"] == 1)]
+                winner_probs = np.clip(valid_winners["prob"].values, 1e-15, 1.0)
+                eval_metrics["group_log_loss"] = -float(np.mean(np.log(winner_probs)))
+                eval_metrics["group_count"] = int(len(valid_groups))
+            else:
+                eval_metrics["group_log_loss"] = float("nan")
+                eval_metrics["group_count"] = 0
+
+        return eval_metrics
+
     def train(
         self,
         config: Dict[str, Any],
@@ -330,6 +472,7 @@ class ModelTrainer:
         model_config = config.get("model", config)
         model_type = model_config.get("type", "sklearn")
 
+        test_df = None
         if group_column:
             if model_type not in ("xgboost", "lightgbm"):
                 raise ValueError("group_column currently supports only xgboost/lightgbm models")
@@ -475,6 +618,33 @@ class ModelTrainer:
                 else:
                     test_output[col] = df.loc[X_test.index, col].values
 
+        # Compute universal eval metrics if eval config is present
+        eval_config = config.get("eval")
+        if eval_config:
+            # Ensure eval group_column is in test_output
+            eval_group_col = eval_config.get("group_column")
+            if eval_group_col and eval_group_col not in test_output.columns:
+                if group_column and test_df is not None and eval_group_col in test_df.columns:
+                    test_output[eval_group_col] = test_df[eval_group_col].values
+                elif eval_group_col in df.columns:
+                    test_output[eval_group_col] = df.loc[X_test.index, eval_group_col].values
+
+            eval_metrics = self._compute_eval_metrics(
+                df=df,
+                X_test=X_test,
+                y_pred=y_pred,
+                test_output=test_output,
+                eval_config=eval_config,
+                target=target,
+                is_regression=is_regression,
+                model=model,
+                group_column=group_column,
+                test_df=test_df if group_column else None,
+            )
+            if eval_metrics:
+                metrics["eval"] = eval_metrics
+                logger.info(f"Eval metrics: {eval_metrics}")
+
         # Save to parquet
         test_output_path = test_dir / f"{model_name}_test.parquet"
         test_output.to_parquet(test_output_path)
@@ -497,6 +667,7 @@ class ModelTrainer:
             "leakage_columns": leakage_columns,
             "group_column": group_column,
             "group_objective": group_objective,
+            "eval_config": eval_config,
             "metrics": metrics,
             "train_size": len(X_train),
             "test_size": len(X_test)
