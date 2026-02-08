@@ -4,7 +4,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class StorageType(str, Enum):
@@ -81,7 +81,29 @@ class ModelConfig(BaseModel):
     )
     features: List[str] = Field(..., description="Feature columns to use")
     target: str = Field(..., description="Target column")
+    group_column: Optional[str] = Field(
+        default=None, description="Optional group column for race-level/ranking training"
+    )
+    group_objective: Optional[str] = Field(
+        default=None, description="Optional ranking objective (e.g., rank:softmax)"
+    )
     cv_folds: int = Field(default=5, description="Cross-validation folds")
+    leakage_columns: Optional[List[str]] = Field(
+        default=None,
+        description="Columns excluded from training due to target/temporal leakage. "
+                    "Included in test output for post-hoc evaluation."
+    )
+
+    @model_validator(mode='after')
+    def check_leakage_columns(self):
+        if self.leakage_columns:
+            leaked = set(self.features) & set(self.leakage_columns)
+            if leaked:
+                raise ValueError(
+                    f"Features contain leakage columns: {sorted(leaked)}. "
+                    "These columns must not be used as training features."
+                )
+        return self
 
 
 class ExperimentConfig(BaseModel):

@@ -8,6 +8,7 @@ import pickle
 import json
 
 import pandas as pd
+import numpy as np
 from sklearn.model_selection import train_test_split
 
 logger = logging.getLogger(__name__)
@@ -69,6 +70,9 @@ class ModelTrainer:
         model_type: str = "sklearn"
     ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
         """Prepare train/test splits."""
+        # Drop rows where target is NaN (labels can't have NaN even for xgboost)
+        df = df[df[target].notna()].copy()
+
         X = df[features].copy()
         y = df[target]
 
@@ -130,9 +134,87 @@ class ModelTrainer:
 
         return X_train, X_test, y_train, y_test
 
+    def prepare_group_data(
+        self,
+        df: pd.DataFrame,
+        features: List[str],
+        target: str,
+        split_config: Dict[str, Any],
+        group_column: str,
+        model_type: str = "xgboost"
+    ) -> Tuple[
+        pd.DataFrame, pd.DataFrame, pd.Series, pd.Series, List[int], List[int], pd.DataFrame, pd.DataFrame
+    ]:
+        """Prepare group-aware train/test splits."""
+        if group_column not in df.columns:
+            raise ValueError(f"group_column not found in data: {group_column}")
+
+        method = split_config.get("method", "random")
+        random_state = split_config.get("random_state", 42)
+
+        if method == "time":
+            time_column = split_config.get("time_column")
+            if not time_column:
+                raise ValueError("time method requires time_column")
+
+            group_times = (
+                df.groupby(group_column)[time_column]
+                .min()
+                .sort_values()
+            )
+            cutoff = split_config.get("cutoff")
+            if cutoff:
+                train_groups = group_times[group_times < cutoff].index
+                test_groups = group_times[group_times >= cutoff].index
+            else:
+                test_size = split_config.get("test_size", 0.2)
+                split_idx = int(len(group_times) * (1 - test_size))
+                train_groups = group_times.index[:split_idx]
+                test_groups = group_times.index[split_idx:]
+        elif method == "random":
+            test_size = split_config.get("test_size", 0.2)
+            group_ids = df[group_column].dropna().unique()
+            rng = np.random.RandomState(random_state)
+            rng.shuffle(group_ids)
+            split_idx = int(len(group_ids) * (1 - test_size))
+            train_groups = group_ids[:split_idx]
+            test_groups = group_ids[split_idx:]
+        else:
+            raise ValueError(f"Unknown split method: {method}")
+
+        train_df = df[df[group_column].isin(train_groups)].copy()
+        test_df = df[df[group_column].isin(test_groups)].copy()
+
+        # Sort to keep group ordering stable for ranker training.
+        train_df = train_df.sort_values(by=[group_column])
+        test_df = test_df.sort_values(by=[group_column])
+
+        X_train = train_df[features].copy()
+        y_train = train_df[target]
+        X_test = test_df[features].copy()
+        y_test = test_df[target]
+
+        # Handle missing values - xgboost handles NaN natively, others need imputation
+        if model_type != "xgboost":
+            for col in X_train.columns:
+                if X_train[col].dtype in ['float64', 'int64']:
+                    X_train[col] = X_train[col].fillna(X_train[col].median())
+                    X_test[col] = X_test[col].fillna(X_test[col].median())
+                else:
+                    train_mode = X_train[col].mode()
+                    fill_value = train_mode[0] if not train_mode.empty else 0
+                    X_train[col] = X_train[col].fillna(fill_value)
+                    X_test[col] = X_test[col].fillna(fill_value)
+
+        group_train = train_df.groupby(group_column).size().tolist()
+        group_test = test_df.groupby(group_column).size().tolist()
+
+        return X_train, X_test, y_train, y_test, group_train, group_test, train_df, test_df
+
     def create_model(self, model_config: Dict[str, Any]) -> Any:
         """Create model instance from config."""
         model_type = model_config.get("type", "sklearn")
+        group_column = model_config.get("group_column")
 
         if model_type == "sklearn":
             class_path = model_config["class"]
@@ -145,12 +227,69 @@ class ModelTrainer:
             return model_class(**hyperparams)
         elif model_type == "xgboost":
             import xgboost as xgb
-            return xgb.XGBClassifier(**model_config.get("hyperparameters", {}))
+            # Check for explicit class specification
+            model_class_name = model_config.get("class", "XGBClassifier")
+            if group_column:
+                return xgb.XGBRanker(**model_config.get("hyperparameters", {}))
+            elif model_class_name == "XGBRegressor":
+                return xgb.XGBRegressor(**model_config.get("hyperparameters", {}))
+            else:
+                return xgb.XGBClassifier(**model_config.get("hyperparameters", {}))
         elif model_type == "lightgbm":
             import lightgbm as lgb
+            if group_column:
+                return lgb.LGBMRanker(**model_config.get("hyperparameters", {}))
             return lgb.LGBMClassifier(**model_config.get("hyperparameters", {}))
         else:
             raise ValueError(f"Unknown model type: {model_type}")
+
+    def _compute_group_metrics(
+        self,
+        df: pd.DataFrame,
+        scores: np.ndarray,
+        group_column: str,
+        target: str
+    ) -> Dict[str, float]:
+        """Compute race-level metrics using softmax within each group."""
+        work = df[[group_column, target]].copy()
+        work["_score"] = scores
+
+        # Softmax per group with numerical stability
+        group_max = work.groupby(group_column)["_score"].transform("max")
+        exp_scores = np.exp(work["_score"] - group_max)
+        group_sum = exp_scores.groupby(work[group_column]).transform("sum")
+        work["_prob"] = exp_scores / group_sum
+
+        group_wins = work.groupby(group_column)[target].sum()
+        valid_groups = group_wins[group_wins == 1].index
+
+        if len(valid_groups) == 0:
+            return {
+                "group_log_loss": float("nan"),
+                "group_accuracy": float("nan"),
+                "group_count": 0
+            }
+
+        valid_mask = work[group_column].isin(valid_groups) & (work[target] == 1)
+        win_probs = work.loc[valid_mask, "_prob"]
+        win_probs = np.clip(win_probs, 1e-15, 1.0)
+        group_log_loss = -float(np.mean(np.log(win_probs)))
+
+        pred_winner_idx = work.groupby(group_column)["_prob"].idxmax()
+        true_winner_idx = (
+            work.loc[valid_mask]
+            .groupby(group_column)
+            .apply(lambda group: group.index[0])
+        )
+        aligned_pred = pred_winner_idx.loc[valid_groups]
+        aligned_true = true_winner_idx.loc[valid_groups]
+        group_accuracy = float((aligned_pred == aligned_true).mean())
+
+        return {
+            "group_log_loss": group_log_loss,
+            "group_accuracy": group_accuracy,
+            "group_count": int(len(valid_groups))
+        }
 
     def train(
         self,
@@ -172,6 +311,18 @@ class ModelTrainer:
         # Prepare data
         features = config["features"]
         target = config["target"]
+        group_column = config.get("group_column")
+
+        # Leakage guard
+        leakage_columns = config.get("leakage_columns") or []
+        if leakage_columns:
+            leaked = set(features) & set(leakage_columns)
+            if leaked:
+                raise ValueError(
+                    f"Features contain leakage columns: {sorted(leaked)}. "
+                    "These columns must not be used as training features."
+                )
+            logger.info(f"Leakage columns declared (pass-through only): {leakage_columns}")
         # Support both "split" and "train_test_split" keys
         split_config = config.get("train_test_split") or config.get("split", {"method": "random", "test_size": 0.2})
 
@@ -179,9 +330,17 @@ class ModelTrainer:
         model_config = config.get("model", config)
         model_type = model_config.get("type", "sklearn")
 
-        X_train, X_test, y_train, y_test = self.prepare_data(
-            df, features, target, split_config, model_type
-        )
+        if group_column:
+            if model_type not in ("xgboost", "lightgbm"):
+                raise ValueError("group_column currently supports only xgboost/lightgbm models")
+
+            X_train, X_test, y_train, y_test, group_train, group_test, train_df, test_df = self.prepare_group_data(
+                df, features, target, split_config, group_column, model_type
+            )
+        else:
+            X_train, X_test, y_train, y_test = self.prepare_data(
+                df, features, target, split_config, model_type
+            )
 
         # For XGBoost with categorical columns, ensure they're properly typed after split
         if model_type == "xgboost":
@@ -193,16 +352,37 @@ class ModelTrainer:
         # Create and train model
         # Config might already be unwrapped by CLI
         model_config = config.get("model", config)
+        group_objective = None
+        if group_column:
+            model_config = dict(model_config)
+            model_config["group_column"] = group_column
+            group_objective = config.get("group_objective", "rank:softmax")
+            hyperparameters = dict(model_config.get("hyperparameters", {}))
+            if "objective" not in hyperparameters:
+                hyperparameters["objective"] = group_objective
+            group_objective = hyperparameters.get("objective")
+            model_config["hyperparameters"] = hyperparameters
+
         model = self.create_model(model_config)
 
-        model.fit(X_train, y_train)
+        if group_column:
+            model.fit(X_train, y_train, group=group_train)
+        else:
+            model.fit(X_train, y_train)
 
         # Evaluate
-        train_score = model.score(X_train, y_train)
-        test_score = model.score(X_test, y_test)
-
-        # Get predictions for detailed metrics
-        y_pred = model.predict(X_test)
+        if group_column:
+            train_scores = model.predict(X_train)
+            test_scores = model.predict(X_test)
+            train_group_metrics = self._compute_group_metrics(train_df, train_scores, group_column, target)
+            test_group_metrics = self._compute_group_metrics(test_df, test_scores, group_column, target)
+            train_score = train_group_metrics["group_accuracy"]
+            test_score = test_group_metrics["group_accuracy"]
+            y_pred = test_scores
+        else:
+            train_score = model.score(X_train, y_train)
+            test_score = model.score(X_test, y_test)
+            y_pred = model.predict(X_test)
 
         # Calculate additional metrics
         from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, mean_squared_error, mean_absolute_error, r2_score, confusion_matrix, log_loss
@@ -216,12 +396,21 @@ class ModelTrainer:
         )
 
         metrics = {
-            "train_score": float(train_score),
-            "test_score": float(test_score)
+            "train_score": float(train_score) if train_score is not None else None,
+            "test_score": float(test_score) if test_score is not None else None
         }
 
         confusion_mat = None
-        if is_regression:
+        if group_column:
+            metrics.update({
+                "group_log_loss": float(test_group_metrics["group_log_loss"]),
+                "group_accuracy": float(test_group_metrics["group_accuracy"]),
+                "group_log_loss_train": float(train_group_metrics["group_log_loss"]),
+                "group_accuracy_train": float(train_group_metrics["group_accuracy"]),
+                "group_count_train": int(train_group_metrics["group_count"]),
+                "group_count_test": int(test_group_metrics["group_count"])
+            })
+        elif is_regression:
             # Regression metrics
             mse = mean_squared_error(y_test, y_pred)
             metrics.update({
@@ -255,16 +444,36 @@ class ModelTrainer:
         test_dir.mkdir(parents=True, exist_ok=True)
 
         # Create test dataframe with predictions
-        test_output = pd.DataFrame(X_test).copy()
+        if group_column:
+            test_output = test_df[[group_column]].join(X_test).copy()
+        else:
+            test_output = pd.DataFrame(X_test).copy()
         test_output[f"{target}_actual"] = y_test.values
         test_output[f"{target}_pred"] = y_pred
 
         # Add probabilities if available
-        if hasattr(model, "predict_proba"):
+        if group_column:
+            prob_frame = pd.DataFrame({
+                group_column: test_df[group_column].values,
+                "_score": y_pred
+            })
+            group_max = prob_frame.groupby(group_column)["_score"].transform("max")
+            exp_scores = np.exp(prob_frame["_score"] - group_max)
+            group_sum = exp_scores.groupby(prob_frame[group_column]).transform("sum")
+            test_output[f"{target}_pred_proba"] = (exp_scores / group_sum).values
+        elif hasattr(model, "predict_proba"):
             if not is_regression:
                 # For classification, get probability of positive class
                 y_pred_proba = model.predict_proba(X_test)
                 test_output[f"{target}_pred_proba"] = y_pred_proba[:, 1]
+
+        # Append any declared leakage columns for post-hoc evaluation
+        for col in leakage_columns:
+            if col in df.columns:
+                if group_column:
+                    test_output[col] = test_df[col].values
+                else:
+                    test_output[col] = df.loc[X_test.index, col].values
 
         # Save to parquet
         test_output_path = test_dir / f"{model_name}_test.parquet"
@@ -285,6 +494,9 @@ class ModelTrainer:
             "target": target,
             "hyperparameters": model_config.get("hyperparameters", {}),
             "split_config": split_config,
+            "leakage_columns": leakage_columns,
+            "group_column": group_column,
+            "group_objective": group_objective,
             "metrics": metrics,
             "train_size": len(X_train),
             "test_size": len(X_test)
