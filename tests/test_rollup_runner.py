@@ -530,7 +530,7 @@ class TestRollupRunnerHierarchical:
 
             file_path = subdir / f"data-stream-1-2025-11-15-{hour}-test.gz"
             with gzip.open(file_path, 'wt') as f:
-                f.write('{"id": "test_record", "hour": "' + hour + '", "value": 1}\n')
+                f.write('{"id": "test_record", "hour": ' + str(int(hour)) + ', "value": 1}\n')
             test_files.append(file_path)
 
             # Upload to S3 with the expected structure
@@ -568,7 +568,6 @@ class TestRollupRunnerHierarchical:
         output_df = pd.read_parquet(io.BytesIO(response['Body'].read()))
 
         assert len(output_df) == 3
-        # The hour column should now be properly converted to integers due to the NaN cleaning fix
         assert set(output_df['hour']) == {0, 1, 2}
         assert all(output_df['id'] == 'test_record')
 
