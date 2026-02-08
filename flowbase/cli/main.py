@@ -353,6 +353,9 @@ def features_compile(config_file: str, dataset: str, output: str, preview: bool)
     from flowbase.pipelines.feature_compiler import FeatureCompiler
     from flowbase.query.engines.duckdb_engine import DuckDBEngine
     import yaml
+    import tempfile
+    import shutil
+    import os
     from pathlib import Path
 
     try:
@@ -383,65 +386,161 @@ def features_compile(config_file: str, dataset: str, output: str, preview: bool)
             first_feature = feature_config['features'][0]
             use_declarative = 'type' in first_feature
 
-        # Compile to SQL
-        if use_declarative:
-            from flowbase.pipelines.declarative_feature_compiler import DeclarativeFeatureCompiler
-            console.print("[dim]Using declarative feature compiler[/dim]")
-
-            # Get entity_id and time columns from config, with sensible defaults
-            entity_id_column = feature_config.get('entity_id_column', 'entity_id')
-            time_column = feature_config.get('time_column', 'timestamp')
-
-            compiler = DeclarativeFeatureCompiler(
-                entity_id_column=entity_id_column,
-                time_column=time_column,
-                source_table=source_table
-            )
-            sql = compiler.compile(feature_config)
-        else:
+        if not use_declarative:
+            # Expression-based compiler — single pass, existing behavior
             console.print("[dim]Using expression-based compiler[/dim]")
             compiler = FeatureCompiler(source_table=source_table)
             sql = compiler.compile(feature_config)
 
-        console.print("[dim]Generated SQL:[/dim]")
-        console.print(sql)
-        console.print()
+            console.print("[dim]Generated SQL:[/dim]")
+            console.print(sql)
+            console.print()
 
-        # Execute
-        with console.status("[bold blue]Executing..."):
-            engine = DuckDBEngine()
+            with console.status("[bold blue]Executing..."):
+                engine = DuckDBEngine()
+                if dataset:
+                    path = Path(dataset)
+                    file_format = "parquet" if path.suffix == ".parquet" else "csv"
+                    table_name = dataset_ref if dataset_ref else "raw_data"
+                    engine.register_file(table_name, dataset, file_format)
+                else:
+                    console.print("[yellow]Warning:[/yellow] No dataset specified, using raw_data")
+                result_df = engine.execute(sql)
 
-            # Register source
+            console.print(f"[green]✓[/green] Generated {len(result_df):,} rows × {len(result_df.columns)} columns")
+            if preview:
+                console.print("\n[bold]Preview:[/bold]")
+                console.print(result_df.head(10).to_string())
+
+            if not output:
+                output = f"data/features/{feature_config['name']}.parquet"
+                Path(output).parent.mkdir(parents=True, exist_ok=True)
+            result_df.to_parquet(output)
+            console.print(f"[green]✓[/green] Saved to {output}")
+            engine.close()
+            return
+
+        # Declarative compiler
+        from flowbase.pipelines.declarative_feature_compiler import DeclarativeFeatureCompiler
+        console.print("[dim]Using declarative feature compiler[/dim]")
+
+        entity_id_column = feature_config.get('entity_id_column', 'entity_id')
+        time_column = feature_config.get('time_column', 'timestamp')
+
+        compiler = DeclarativeFeatureCompiler(
+            entity_id_column=entity_id_column,
+            time_column=time_column,
+            source_table=source_table
+        )
+
+        # Group features by pass number
+        features_by_pass = {}
+        for f in feature_config.get("features", []):
+            p = f.get("pass", 1)
+            features_by_pass.setdefault(p, []).append(f)
+
+        if len(features_by_pass) <= 1:
+            # Single pass — compile all features at once (backward compatible)
+            sql = compiler.compile(feature_config)
+
+            console.print("[dim]Generated SQL:[/dim]")
+            console.print(sql)
+            console.print()
+
+            with console.status("[bold blue]Executing..."):
+                engine = DuckDBEngine()
+                if dataset:
+                    path = Path(dataset)
+                    file_format = "parquet" if path.suffix == ".parquet" else "csv"
+                    table_name = dataset_ref if dataset_ref else "raw_data"
+                    engine.register_file(table_name, dataset, file_format)
+                else:
+                    console.print("[yellow]Warning:[/yellow] No dataset specified, using raw_data")
+                result_df = engine.execute(sql)
+
+            console.print(f"[green]✓[/green] Generated {len(result_df):,} rows × {len(result_df.columns)} columns")
+            if preview:
+                console.print("\n[bold]Preview:[/bold]")
+                console.print(result_df.head(10).to_string())
+
+            if not output:
+                output = f"data/features/{feature_config['name']}.parquet"
+                Path(output).parent.mkdir(parents=True, exist_ok=True)
+            result_df.to_parquet(output)
+            console.print(f"[green]✓[/green] Saved to {output}")
+            engine.close()
+        else:
+            # Multi-pass staged execution — each pass gets a fresh DuckDB connection
+            # to ensure memory is freed between passes
+            console.print(f"[blue]Staged execution:[/blue] {len(features_by_pass)} passes detected")
+            temp_dir = tempfile.mkdtemp(prefix="flowbase_features_")
+
+            if not output:
+                output = f"data/features/{feature_config['name']}.parquet"
+                Path(output).parent.mkdir(parents=True, exist_ok=True)
+            output_abs = os.path.abspath(output)
+
+            # Resolve dataset path
             if dataset:
-                path = Path(dataset)
-                file_format = "parquet" if path.suffix == ".parquet" else "csv"
-                table_name = dataset_ref if dataset_ref else "raw_data"
-                engine.register_file(table_name, dataset, file_format)
+                current_input = os.path.abspath(dataset)
             else:
                 console.print("[yellow]Warning:[/yellow] No dataset specified, using raw_data")
+                current_input = None
 
-            # Execute
-            result_df = engine.execute(sql)
+            sorted_passes = sorted(features_by_pass.items())
 
-        console.print(f"[green]✓[/green] Generated {len(result_df):,} rows × {len(result_df.columns)} columns")
+            for i, (pass_num, pass_feats) in enumerate(sorted_passes):
+                is_last = (i == len(sorted_passes) - 1)
+                pass_output = output_abs if is_last else os.path.join(temp_dir, f"pass_{pass_num}.parquet")
 
-        # Preview
-        if preview:
-            console.print("\n[bold]Preview:[/bold]")
-            console.print(result_df.head(10).to_string())
+                console.print(f"\n[bold]Pass {pass_num}:[/bold] {len(pass_feats)} features")
+                feature_names = [f["name"] for f in pass_feats]
+                console.print(f"[dim]  Features: {', '.join(feature_names)}[/dim]")
 
-        # Save
-        if output:
-            result_df.to_parquet(output)
-            console.print(f"[green]✓[/green] Saved to {output}")
-        else:
-            # Default output location
-            output = f"data/features/{feature_config['name']}.parquet"
-            Path(output).parent.mkdir(parents=True, exist_ok=True)
-            result_df.to_parquet(output)
-            console.print(f"[green]✓[/green] Saved to {output}")
+                # Compile SQL for just this pass's features
+                pass_config = {**feature_config, "features": pass_feats}
+                sql = compiler.compile(pass_config)
 
-        engine.close()
+                with console.status(f"[bold blue]Executing pass {pass_num}..."):
+                    # Fresh engine per pass for memory isolation
+                    engine = DuckDBEngine(config={"temp_directory": temp_dir})
+
+                    if current_input:
+                        file_format = "parquet" if current_input.endswith(".parquet") else "csv"
+                        engine.register_file(source_table, current_input, file_format)
+
+                    # Stream results directly to parquet via COPY TO
+                    copy_sql = f"COPY ({sql}) TO '{pass_output}' (FORMAT PARQUET, ROW_GROUP_SIZE 100000)"
+                    engine.conn.execute(copy_sql)
+
+                    # Get row count from output
+                    row_count = engine.conn.execute(f"SELECT COUNT(*) FROM '{pass_output}'").fetchone()[0]
+                    col_count = len(engine.conn.execute(f"SELECT * FROM '{pass_output}' LIMIT 0").description)
+                    engine.close()
+
+                console.print(f"[green]✓[/green] Pass {pass_num}: {row_count:,} rows × {col_count} columns")
+
+                # Clean up previous intermediate file
+                if i > 0 and current_input != os.path.abspath(dataset if dataset else ""):
+                    try:
+                        os.remove(current_input)
+                    except OSError:
+                        pass
+
+                current_input = pass_output
+
+            console.print(f"\n[green]✓[/green] Saved to {output}")
+
+            # Preview from final output
+            if preview:
+                engine = DuckDBEngine()
+                preview_df = engine.conn.execute(f"SELECT * FROM '{output_abs}' LIMIT 10").df()
+                engine.close()
+                console.print("\n[bold]Preview:[/bold]")
+                console.print(preview_df.to_string())
+
+            # Clean up temp directory
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
     except Exception as e:
         console.print(f"[red]✗[/red] Failed: {e}")
