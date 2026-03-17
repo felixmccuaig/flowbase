@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import calendar
 import gzip
 import json
 import logging
@@ -111,6 +112,7 @@ class RollupRunner:
         source_pattern = source_config.get("pattern", "*")
         input_format = source_config.get("format", "jsonl")
         strict_mode = source_config.get("strict", True)
+        expected_file_count = source_config.get("expected_file_count")
 
         target_bucket = target_config.get("bucket")
         target_key = target_config.get("key")
@@ -166,6 +168,14 @@ class RollupRunner:
                     "type": "rollup",
                     "source_files": 0,
                     "status": "no_files"
+                }
+
+            if expected_file_count is not None and len(matching_keys) != expected_file_count:
+                return {
+                    "error": "Expected source file count mismatch",
+                    "expected_file_count": expected_file_count,
+                    "source_files": len(matching_keys),
+                    "source_keys": matching_keys,
                 }
 
             logger.info(f"Found {len(matching_keys)} files to rollup")
@@ -266,6 +276,8 @@ class RollupRunner:
         # Substitute template variables in source and target configs
         source_config = self._substitute_templates_in_config(source_config, params)
         target_config = self._substitute_templates_in_config(target_config, params)
+        if "expected_file_count" not in source_config:
+            source_config["expected_file_count"] = self._default_expected_file_count(stage, params)
 
         # Override the config for this execution
         rollup_config = config.copy()
@@ -302,6 +314,20 @@ class RollupRunner:
         })
 
         return result
+
+    def _default_expected_file_count(self, stage: str, params: Dict[str, Any]) -> Optional[int]:
+        """Return the default expected file count for hierarchical stages."""
+        if stage == "monthly":
+            year = params.get("year")
+            month = params.get("month")
+            if year is None or month is None:
+                raise ValueError("Monthly hierarchical rollups require 'year' and 'month' params")
+            return calendar.monthrange(int(year), int(month))[1]
+
+        if stage == "yearly":
+            return 12
+
+        return None
 
     def _execute_archive_operation(self, config: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
         """Execute an archive operation."""

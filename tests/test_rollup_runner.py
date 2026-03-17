@@ -507,7 +507,8 @@ class TestRollupRunnerHierarchical:
                 "bucket": "test-bucket",
                 "prefix": "source/",
                 "pattern": "*.jsonl",
-                "format": "jsonl"
+                "format": "jsonl",
+                "expected_file_count": 1
             },
             "target": {
                 "bucket": "test-bucket",
@@ -520,7 +521,7 @@ class TestRollupRunnerHierarchical:
             }
         }
 
-        runner = RollupRunner(s3_bucket='test-bucket')
+        runner = RollupRunner(s3_bucket='test-bucket', temp_dir=str(temp_dir / "rollup-temp"))
         result = runner.run(
             config_path=None,
             config_dict=config,
@@ -549,7 +550,8 @@ class TestRollupRunnerHierarchical:
                 "bucket": "test-bucket",
                 "prefix": "source/",
                 "pattern": "*.parquet",
-                "format": "parquet"
+                "format": "parquet",
+                "expected_file_count": 2
             },
             "target": {
                 "bucket": "test-bucket",
@@ -782,6 +784,88 @@ class TestRollupRunnerErrorHandling:
         with pytest.raises(ClientError):
             s3_mock.get_object(Bucket='test-bucket', Key='target/rollup.parquet')
 
+    def test_monthly_rollup_requires_all_calendar_days(self, temp_dir, s3_mock):
+        """Test that monthly hierarchical rollup fails if any day file is missing."""
+        source_files = create_test_parquet_files(temp_dir, 29, 1)
+
+        for day_index, file_path in enumerate(source_files, start=1):
+            s3_mock.upload_file(
+                str(file_path),
+                'test-bucket',
+                f"source/results_2025_11_{day_index:02d}.parquet",
+            )
+
+        config = {
+            "rollup_type": "hierarchical",
+            "stage": "monthly",
+            "source": {
+                "bucket": "test-bucket",
+                "prefix": "source/",
+                "pattern": "results_2025_11_*.parquet",
+                "format": "parquet"
+            },
+            "target": {
+                "bucket": "test-bucket",
+                "key": "target/results_2025_11.parquet",
+                "format": "parquet"
+            }
+        }
+
+        runner = RollupRunner(s3_bucket='test-bucket')
+        result = runner.run(
+            config_path=None,
+            config_dict=config,
+            params={"year": "2025", "month": "11"},
+        )
+
+        assert result["error"] == "Expected source file count mismatch"
+        assert result["expected_file_count"] == 30
+        assert result["source_files"] == 29
+
+        with pytest.raises(ClientError):
+            s3_mock.get_object(Bucket='test-bucket', Key='target/results_2025_11.parquet')
+
+    def test_yearly_rollup_requires_all_twelve_months(self, temp_dir, s3_mock):
+        """Test that yearly hierarchical rollup fails if any monthly file is missing."""
+        source_files = create_test_parquet_files(temp_dir, 11, 1)
+
+        for month_index, file_path in enumerate(source_files, start=1):
+            s3_mock.upload_file(
+                str(file_path),
+                'test-bucket',
+                f"source/results_2025_{month_index:02d}.parquet",
+            )
+
+        config = {
+            "rollup_type": "hierarchical",
+            "stage": "yearly",
+            "source": {
+                "bucket": "test-bucket",
+                "prefix": "source/",
+                "pattern": "results_2025_??.parquet",
+                "format": "parquet"
+            },
+            "target": {
+                "bucket": "test-bucket",
+                "key": "target/results_2025.parquet",
+                "format": "parquet"
+            }
+        }
+
+        runner = RollupRunner(s3_bucket='test-bucket')
+        result = runner.run(
+            config_path=None,
+            config_dict=config,
+            params={"year": "2025"},
+        )
+
+        assert result["error"] == "Expected source file count mismatch"
+        assert result["expected_file_count"] == 12
+        assert result["source_files"] == 11
+
+        with pytest.raises(ClientError):
+            s3_mock.get_object(Bucket='test-bucket', Key='target/results_2025.parquet')
+
     def test_s3_access_error(self):
         """Test handling of S3 access errors."""
         config = {
@@ -917,7 +1001,7 @@ class TestRollupRunnerIntegration:
             }
         }
 
-        runner = RollupRunner(s3_bucket='test-bucket')
+        runner = RollupRunner(s3_bucket='test-bucket', temp_dir=str(temp_dir / "rollup-temp"))
         result = runner.run(
             config_path=None,
             config_dict=config,
