@@ -115,6 +115,7 @@ class RollupRunner:
         target_key = target_config.get("key")
         output_format = target_config.get("format", "parquet")
         compression = target_config.get("compression")
+        skip_if_target_exists = target_config.get("skip_if_exists", False)
 
         # Initialize S3 sync for source and target
         source_s3 = self._get_s3_sync(source_bucket, source_prefix)
@@ -122,6 +123,29 @@ class RollupRunner:
 
         if not source_s3 or not target_s3:
             return {"error": "S3 sync not available"}
+
+        # Update target key if compression was applied
+        upload_key = target_key
+        if compression == "gzip" and not target_key.endswith('.gz'):
+            upload_key = target_key + '.gz'
+
+        if skip_if_target_exists and target_s3.file_exists(upload_key):
+            s3_url = f"s3://{target_bucket}/{upload_key}"
+            logger.info(f"Skipping rollup because target already exists: {s3_url}")
+            return {
+                "type": "rollup",
+                "status": "skipped",
+                "reason": "target_exists",
+                "source_files": 0,
+                "source_keys": [],
+                "rows_processed": 0,
+                "output_format": output_format,
+                "compression": compression,
+                "target_s3_url": s3_url,
+                "source_bucket": source_bucket,
+                "target_bucket": target_bucket,
+                "target_key": upload_key,
+            }
 
         # Create temporary directory for processing
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -175,11 +199,6 @@ class RollupRunner:
             logger.info(f"Writing combined data ({len(df)} rows) to {output_format} format")
             final_temp_file = self._write_output_file(df, target_temp_file, output_format, compression)
 
-            # Update target key if compression was applied
-            upload_key = target_key
-            if compression == "gzip" and not target_key.endswith('.gz'):
-                upload_key = target_key + '.gz'
-
             # Upload to target S3 location
             logger.info(f"Uploading rolled-up file to s3://{target_bucket}/{upload_key}")
             if target_s3.upload_file(final_temp_file, upload_key):
@@ -192,6 +211,7 @@ class RollupRunner:
             return {
                 "type": "rollup",
                 "source_files": len(matching_keys),
+                "source_keys": matching_keys,
                 "rows_processed": len(df),
                 "output_format": output_format,
                 "compression": compression,
@@ -233,12 +253,9 @@ class RollupRunner:
 
         # Get the source files that were processed (this would need to be returned from _execute_rollup)
         # For now, we'll need to reconstruct this information
-        source_files = result.get("source_files", [])
-        if isinstance(source_files, int):
-            # If it's just a count, we can't get the actual file list
-            # This is a limitation of the current design
-            logger.warning("Cannot archive/delete source files: file list not available")
-            source_files = []
+        source_files = result.get("source_keys", [])
+        if not source_files:
+            logger.info("No source keys available for archive/delete post-processing")
 
         # Post-processing: archiving
         if post_process.get("archive_source", False) and source_files:

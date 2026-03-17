@@ -378,6 +378,46 @@ class TestRollupRunnerSimple:
             lines = content.strip().split('\n')
             assert len(lines) == 20
 
+    def test_skip_if_target_exists(self, temp_dir, s3_mock):
+        """Test that rollup can skip when the target already exists."""
+        source_files = create_test_jsonl_files(temp_dir, 2, 5)
+
+        for file_path in source_files:
+            s3_mock.upload_file(str(file_path), 'test-bucket', f"source/{file_path.name}")
+
+        existing_output = temp_dir / "existing.parquet"
+        pd.DataFrame([{"id": "existing", "value": 999}]).to_parquet(existing_output, index=False)
+        s3_mock.upload_file(str(existing_output), 'test-bucket', 'target/rollup.parquet')
+
+        config = {
+            "rollup_type": "simple",
+            "source": {
+                "bucket": "test-bucket",
+                "prefix": "source/",
+                "pattern": "*.jsonl",
+                "format": "jsonl"
+            },
+            "target": {
+                "bucket": "test-bucket",
+                "key": "target/rollup.parquet",
+                "format": "parquet",
+                "skip_if_exists": True
+            }
+        }
+
+        runner = RollupRunner(s3_bucket='test-bucket')
+        result = runner.run(config_path=None, config_dict=config)
+
+        assert result["status"] == "skipped"
+        assert result["reason"] == "target_exists"
+        assert result["source_keys"] == []
+        assert result["rows_processed"] == 0
+
+        response = s3_mock.get_object(Bucket='test-bucket', Key='target/rollup.parquet')
+        output_df = pd.read_parquet(io.BytesIO(response['Body'].read()))
+        assert len(output_df) == 1
+        assert output_df.iloc[0]["id"] == "existing"
+
 
 class TestRollupRunnerHierarchical:
     """Test hierarchical rollup operations."""
@@ -493,6 +533,42 @@ class TestRollupRunnerHierarchical:
         response = s3_mock.get_object(Bucket='test-bucket', Key='monthly/2025/02.parquet')
         output_df = pd.read_parquet(io.BytesIO(response['Body'].read()))
         assert len(output_df) == 10
+
+    def test_hierarchical_rollup_delete_source_uses_source_keys(self, temp_dir, s3_mock):
+        """Test that hierarchical rollup can delete source files after success."""
+        source_files = create_test_parquet_files(temp_dir, 2, 4)
+
+        for file_path in source_files:
+            s3_mock.upload_file(str(file_path), 'test-bucket', f"source/{file_path.name}")
+
+        config = {
+            "rollup_type": "hierarchical",
+            "stage": "monthly",
+            "source": {
+                "bucket": "test-bucket",
+                "prefix": "source/",
+                "pattern": "*.parquet",
+                "format": "parquet"
+            },
+            "target": {
+                "bucket": "test-bucket",
+                "key": "monthly/2025/01.parquet",
+                "format": "parquet"
+            },
+            "post_process": {
+                "delete_source": True
+            }
+        }
+
+        runner = RollupRunner(s3_bucket='test-bucket')
+        result = runner.run(config_path=None, config_dict=config)
+
+        assert result["stage"] == "monthly"
+        assert result["deleted_source"] is True
+        assert len(result["source_keys"]) == 2
+
+        remaining = s3_mock.list_objects_v2(Bucket='test-bucket', Prefix='source/')
+        assert remaining["KeyCount"] == 0
 
     def test_hierarchical_rollup_unknown_stage(self):
         """Test error handling for unknown hierarchical stage."""
