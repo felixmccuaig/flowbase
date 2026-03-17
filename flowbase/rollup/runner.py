@@ -110,6 +110,7 @@ class RollupRunner:
         source_prefix = source_config.get("prefix", "")
         source_pattern = source_config.get("pattern", "*")
         input_format = source_config.get("format", "jsonl")
+        strict_mode = source_config.get("strict", True)
 
         target_bucket = target_config.get("bucket")
         target_key = target_config.get("key")
@@ -171,19 +172,45 @@ class RollupRunner:
 
             # Download all matching files
             downloaded_files = []
+            failed_downloads = []
             for key in matching_keys:
                 local_file = source_temp_dir / Path(key).name
                 if source_s3.download_file(key[len(source_prefix):].lstrip("/"), local_file):
                     downloaded_files.append(local_file)
                 else:
-                    logger.warning(f"Failed to download {key}")
+                    logger.error(f"Failed to download {key}")
+                    failed_downloads.append(key)
+
+            if failed_downloads and strict_mode:
+                return {
+                    "error": "Failed to download all source files",
+                    "failed_downloads": failed_downloads,
+                    "source_files": len(matching_keys),
+                    "source_keys": matching_keys,
+                }
 
             if not downloaded_files:
                 return {"error": "Failed to download any source files"}
 
+            if strict_mode and len(downloaded_files) != len(matching_keys):
+                return {
+                    "error": "Source file download count mismatch",
+                    "downloaded_files": len(downloaded_files),
+                    "source_files": len(matching_keys),
+                    "source_keys": matching_keys,
+                }
+
             # Combine files based on input format
             logger.info(f"Combining {len(downloaded_files)} files")
-            combined_data = self._combine_files(downloaded_files, input_format)
+            try:
+                combined_data = self._combine_files(downloaded_files, input_format)
+            except Exception as e:
+                return {
+                    "error": "Failed to combine source files",
+                    "details": str(e),
+                    "source_files": len(matching_keys),
+                    "source_keys": matching_keys,
+                }
 
             if not combined_data:
                 logger.warning("No data found in source files")
@@ -390,34 +417,32 @@ class RollupRunner:
         combined_data = []
 
         for file_path in file_list:
-            try:
-                if input_format == "jsonl":
-                    if str(file_path).endswith('.gz'):
-                        with gzip.open(file_path, 'rt') as f:
-                            for line in f:
-                                if line.strip():
-                                    combined_data.append(json.loads(line))
-                    else:
-                        with open(file_path, 'r') as f:
-                            for line in f:
-                                if line.strip():
-                                    combined_data.append(json.loads(line))
+            if input_format == "jsonl":
+                if str(file_path).endswith('.gz'):
+                    with gzip.open(file_path, 'rt') as f:
+                        for line in f:
+                            if line.strip():
+                                combined_data.append(json.loads(line))
+                else:
+                    with open(file_path, 'r') as f:
+                        for line in f:
+                            if line.strip():
+                                combined_data.append(json.loads(line))
 
-                elif input_format == "csv":
-                    if str(file_path).endswith('.gz'):
-                        with gzip.open(file_path, 'rt') as f:
-                            df = pd.read_csv(f)
-                    else:
-                        df = pd.read_csv(file_path)
-                    combined_data.extend(df.to_dict('records'))
+            elif input_format == "csv":
+                if str(file_path).endswith('.gz'):
+                    with gzip.open(file_path, 'rt') as f:
+                        df = pd.read_csv(f)
+                else:
+                    df = pd.read_csv(file_path)
+                combined_data.extend(df.to_dict('records'))
 
-                elif input_format == "parquet":
-                    df = pd.read_parquet(file_path)
-                    combined_data.extend(df.to_dict('records'))
+            elif input_format == "parquet":
+                df = pd.read_parquet(file_path)
+                combined_data.extend(df.to_dict('records'))
 
-            except Exception as e:
-                logger.error(f"Error processing {file_path}: {e}")
-                continue
+            else:
+                raise ValueError(f"Unsupported input format: {input_format}")
 
         return combined_data
 

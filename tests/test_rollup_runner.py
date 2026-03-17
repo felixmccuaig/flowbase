@@ -11,6 +11,7 @@ import boto3
 import pandas as pd
 import pytest
 import yaml
+from botocore.exceptions import ClientError
 from moto import mock_aws
 
 from flowbase.rollup.runner import RollupRunner
@@ -703,6 +704,83 @@ class TestRollupRunnerErrorHandling:
         # Should raise ValueError for invalid format
         with pytest.raises(ValueError, match="Unsupported output format"):
             runner.run(config_path=None, config_dict=config)
+
+    def test_download_failure_returns_error_and_no_output(self, temp_dir, s3_mock, monkeypatch):
+        """Test that any download failure aborts the rollup without writing output."""
+        source_files = create_test_jsonl_files(temp_dir, 2, 3)
+
+        for file_path in source_files:
+            s3_mock.upload_file(str(file_path), 'test-bucket', f"source/{file_path.name}")
+
+        config = {
+            "rollup_type": "simple",
+            "source": {
+                "bucket": "test-bucket",
+                "prefix": "source/",
+                "pattern": "*.jsonl",
+                "format": "jsonl",
+            },
+            "target": {
+                "bucket": "test-bucket",
+                "key": "target/rollup.parquet",
+                "format": "parquet"
+            }
+        }
+
+        runner = RollupRunner(s3_bucket='test-bucket', s3_prefix='source/')
+        original_download = runner.s3_sync.download_file
+
+        def flaky_download(s3_key, local_path):
+            if s3_key.endswith("test_data_1.jsonl"):
+                return False
+            return original_download(s3_key, local_path)
+
+        monkeypatch.setattr(runner.s3_sync, "download_file", flaky_download)
+
+        result = runner.run(config_path=None, config_dict=config)
+
+        assert result["error"] == "Failed to download all source files"
+        assert len(result["failed_downloads"]) == 1
+
+        with pytest.raises(ClientError):
+            s3_mock.get_object(Bucket='test-bucket', Key='target/rollup.parquet')
+
+    def test_parse_failure_returns_error_and_no_output(self, temp_dir, s3_mock):
+        """Test that file parse errors abort the rollup without writing output."""
+        valid_file = temp_dir / "valid.jsonl"
+        with open(valid_file, 'w') as f:
+            f.write('{"id": "valid", "value": 1}\n')
+
+        invalid_file = temp_dir / "invalid.jsonl"
+        with open(invalid_file, 'w') as f:
+            f.write('{"id": "broken", "value": }\n')
+
+        s3_mock.upload_file(str(valid_file), 'test-bucket', 'source/valid.jsonl')
+        s3_mock.upload_file(str(invalid_file), 'test-bucket', 'source/invalid.jsonl')
+
+        config = {
+            "rollup_type": "simple",
+            "source": {
+                "bucket": "test-bucket",
+                "prefix": "source/",
+                "pattern": "*.jsonl",
+                "format": "jsonl",
+            },
+            "target": {
+                "bucket": "test-bucket",
+                "key": "target/rollup.parquet",
+                "format": "parquet"
+            }
+        }
+
+        runner = RollupRunner(s3_bucket='test-bucket')
+        result = runner.run(config_path=None, config_dict=config)
+
+        assert result["error"] == "Failed to combine source files"
+        assert "Expecting value" in result["details"]
+
+        with pytest.raises(ClientError):
+            s3_mock.get_object(Bucket='test-bucket', Key='target/rollup.parquet')
 
     def test_s3_access_error(self):
         """Test handling of S3 access errors."""
