@@ -304,13 +304,27 @@ class RollupRunner:
                 archive_location = self._substitute_templates(archive_location, params)
                 self._archive_files(source_files, archive_location, params)
 
-        if post_process.get("delete_source", False) and source_files:
+        moved_source = False
+        move_target = None
+        if source_files and post_process.get("move_source_to"):
+            move_target = self._substitute_templates(post_process["move_source_to"], params)
+            moved_source = self._move_source_files(source_files, move_target)
+            if not moved_source:
+                return {
+                    "error": "Failed to move source files",
+                    "source_keys": source_files,
+                    "move_target": move_target,
+                }
+
+        if post_process.get("delete_source", False) and source_files and not moved_source:
             self._delete_source_files(source_files)
 
         result.update({
             "stage": stage,
             "archived": post_process.get("archive_source", False),
-            "deleted_source": post_process.get("delete_source", False)
+            "deleted_source": post_process.get("delete_source", False) and not moved_source,
+            "moved_source": moved_source,
+            "move_target": move_target,
         })
 
         return result
@@ -580,20 +594,57 @@ class RollupRunner:
 
         return False
 
+    def _move_source_files(self, file_list: List[str], move_target: str) -> bool:
+        """Move source files to a destination prefix after successful rollup.
+
+        Copies all source files first and deletes originals only after every copy succeeds.
+        """
+        if not move_target.startswith("s3://"):
+            return False
+
+        target_path = move_target.replace("s3://", "")
+        if "/" not in target_path:
+            return False
+
+        target_bucket, target_prefix = target_path.split("/", 1)
+        target_prefix = target_prefix.rstrip("/")
+
+        target_s3 = self._get_s3_sync(target_bucket, "")
+        if not target_s3 or not self.s3_bucket:
+            return False
+
+        moved_keys = []
+        for source_key in file_list:
+            target_key = f"{target_prefix}/{Path(source_key).name}" if target_prefix else Path(source_key).name
+            if not target_s3.copy_object(self.s3_bucket, source_key, target_key):
+                logger.error(f"Failed to move source file to s3://{target_bucket}/{target_key}")
+                return False
+            moved_keys.append(source_key)
+
+        for source_key in moved_keys:
+            if not self._delete_single_source_file(source_key):
+                logger.error(f"Failed to delete source file after move: {source_key}")
+                return False
+
+        return True
+
     def _delete_source_files(self, file_list: List[str]) -> None:
         """Delete source files after successful rollup."""
-        import boto3
-
-        s3_client = boto3.client('s3')
         for s3_key in file_list:
-            try:
-                # Extract bucket from key (assuming same bucket for now)
-                bucket = self.s3_bucket
-                if bucket:
-                    s3_client.delete_object(Bucket=bucket, Key=s3_key)
-                    logger.info(f"Deleted source file: s3://{bucket}/{s3_key}")
-            except Exception as e:
-                logger.warning(f"Failed to delete {s3_key}: {e}")
+            if not self._delete_single_source_file(s3_key):
+                logger.warning(f"Failed to delete {s3_key}")
+
+    def _delete_single_source_file(self, s3_key: str) -> bool:
+        """Delete a single source file from the configured S3 bucket."""
+        bucket = self.s3_bucket
+        if not bucket:
+            return False
+
+        source_s3 = self._get_s3_sync(bucket, "")
+        if not source_s3:
+            return False
+
+        return source_s3.delete_object(s3_key)
 
     def _create_archive(self, file_list: List[str], source_s3: Any, archive_key: str, target_s3: Any) -> bool:
         """Create a compressed archive of files."""

@@ -573,6 +573,46 @@ class TestRollupRunnerHierarchical:
         remaining = s3_mock.list_objects_v2(Bucket='test-bucket', Prefix='source/')
         assert remaining["KeyCount"] == 0
 
+    def test_hierarchical_rollup_move_source_to_archive_prefix(self, temp_dir, s3_mock):
+        """Test that hierarchical rollup can move source files after success."""
+        source_files = create_test_parquet_files(temp_dir, 2, 4)
+
+        for file_path in source_files:
+            s3_mock.upload_file(str(file_path), 'test-bucket', f"source/{file_path.name}")
+
+        config = {
+            "rollup_type": "hierarchical",
+            "stage": "monthly",
+            "source": {
+                "bucket": "test-bucket",
+                "prefix": "source/",
+                "pattern": "*.parquet",
+                "format": "parquet",
+                "expected_file_count": 2
+            },
+            "target": {
+                "bucket": "test-bucket",
+                "key": "monthly/2025/01.parquet",
+                "format": "parquet"
+            },
+            "post_process": {
+                "move_source_to": "s3://test-bucket/archive/monthly/2025/01/"
+            }
+        }
+
+        runner = RollupRunner(s3_bucket='test-bucket')
+        result = runner.run(config_path=None, config_dict=config)
+
+        assert result["stage"] == "monthly"
+        assert result["moved_source"] is True
+        assert result["move_target"] == "s3://test-bucket/archive/monthly/2025/01/"
+
+        remaining = s3_mock.list_objects_v2(Bucket='test-bucket', Prefix='source/')
+        assert remaining["KeyCount"] == 0
+
+        archived = s3_mock.list_objects_v2(Bucket='test-bucket', Prefix='archive/monthly/2025/01/')
+        assert archived["KeyCount"] == 2
+
     def test_hierarchical_rollup_unknown_stage(self):
         """Test error handling for unknown hierarchical stage."""
         config = {

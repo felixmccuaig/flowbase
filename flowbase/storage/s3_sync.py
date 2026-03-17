@@ -181,6 +181,57 @@ class S3Sync:
         except ClientError:
             return False
 
+    def copy_object(
+        self,
+        source_bucket: str,
+        source_key: str,
+        target_key: str,
+    ) -> bool:
+        """Copy an object into this bucket/prefix.
+
+        Args:
+            source_bucket: Source S3 bucket
+            source_key: Full source S3 key
+            target_key: Target S3 key (will be prefixed with self.prefix)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        full_key = f"{self.prefix}/{target_key}" if self.prefix else target_key
+
+        try:
+            self.s3_client.copy(
+                {"Bucket": source_bucket, "Key": source_key},
+                self.bucket,
+                full_key,
+            )
+            logger.info(
+                f"Copied s3://{source_bucket}/{source_key} to s3://{self.bucket}/{full_key}"
+            )
+            return True
+        except (ClientError, NoCredentialsError) as e:
+            logger.error(f"Failed to copy s3://{source_bucket}/{source_key}: {e}")
+            return False
+
+    def delete_object(self, s3_key: str) -> bool:
+        """Delete an object from S3.
+
+        Args:
+            s3_key: S3 key (will be prefixed with self.prefix)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        full_key = f"{self.prefix}/{s3_key}" if self.prefix else s3_key
+
+        try:
+            self.s3_client.delete_object(Bucket=self.bucket, Key=full_key)
+            logger.info(f"Deleted s3://{self.bucket}/{full_key}")
+            return True
+        except (ClientError, NoCredentialsError) as e:
+            logger.error(f"Failed to delete s3://{self.bucket}/{full_key}: {e}")
+            return False
+
     def sync_artifact(
         self,
         local_path: str | Path,
