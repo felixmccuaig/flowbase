@@ -22,6 +22,7 @@ class TaskType(str, Enum):
     INFERENCE = "inference"
     CUSTOM = "custom"
     ROLLUP = "rollup"
+    TRANSFORM = "transform"
 
 
 class TaskStatus(str, Enum):
@@ -487,6 +488,8 @@ class WorkflowRunner:
                 output = self._run_custom(task, config_dir, all_params)
             elif task.task_type == TaskType.ROLLUP:
                 output = self._run_rollup(task, config_dir, all_params)
+            elif task.task_type == TaskType.TRANSFORM:
+                output = self._run_transform(task, config_dir, all_params)
             else:
                 raise ValueError(f"Unsupported task type: {task.task_type}")
 
@@ -1274,6 +1277,85 @@ class WorkflowRunner:
 
         # Execute rollup
         return runner.run(config_path, params=params)
+
+    def _run_transform(
+        self,
+        task: WorkflowTask,
+        config_dir: Path,
+        params: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Run a SQL transform task."""
+        from flowbase.transforms.runner import TransformRunner
+
+        # Resolve config path relative to project root
+        config_path = self._resolve_task_config_path(task.config, config_dir)
+
+        # Find project root and load config for S3 sync
+        search_dir = Path(config_path).parent.resolve()
+        project_root = None
+        while search_dir != search_dir.parent:
+            if (search_dir / "data").exists() or (search_dir / "models").exists():
+                project_root = search_dir
+                break
+            search_dir = search_dir.parent
+
+        if not project_root:
+            project_root = Path(config_path).parent.parent
+
+        # Load project config if not already loaded
+        if not self.project_config:
+            self._load_project_config(project_root)
+
+        query_engine_config = None
+        if self.project_config:
+            query_engine_config = self.project_config.get("query_engine_config")
+
+        runner = TransformRunner(query_engine_config=query_engine_config)
+        result = runner.run(
+            config_path=config_path,
+            params=params,
+            project_root=str(project_root),
+        )
+
+        # Sync transform outputs to S3 if enabled
+        s3_urls = []
+        outputs = result.get("outputs", [])
+        if self.s3_sync and outputs:
+            import os
+
+            data_root_env = os.environ.get('FLOWBASE_DATA_ROOT')
+            data_root_path = Path(data_root_env) if data_root_env else None
+
+            for output in outputs:
+                output_path_value = output.get("path")
+                if not output_path_value:
+                    continue
+
+                output_file = Path(output_path_value)
+                if not output_file.exists():
+                    continue
+
+                self.logger.info(f"Syncing transform output to S3: {output_file}")
+                if data_root_path and output_file.is_relative_to(data_root_path):
+                    relative_path = output_file.relative_to(data_root_path)
+                else:
+                    relative_path = output_file.relative_to(project_root)
+
+                s3_key = str(relative_path)
+                if self.s3_sync.upload_file(output_file, s3_key):
+                    s3_url = f"s3://{self.s3_sync.bucket}/{self.s3_sync.prefix}/{s3_key}".replace("//", "/")
+                    s3_urls.append(s3_url)
+                    self.logger.info(f"Transform output synced to S3: {s3_url}")
+                else:
+                    self.logger.warning(f"Failed to sync transform output to S3: {output_file}")
+
+        return {
+            "type": "transform",
+            "config": config_path,
+            "model_count": len(result.get("models", [])),
+            "outputs": outputs,
+            "s3_urls": s3_urls if s3_urls else None,
+        }
 
     def _resolve_task_config_path(self, config_path: str, workflow_dir: Path) -> str:
         """Resolve task config path relative to project root."""
