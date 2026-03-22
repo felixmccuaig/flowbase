@@ -1310,15 +1310,26 @@ class WorkflowRunner:
         if self.project_config:
             query_engine_config = self.project_config.get("query_engine_config")
 
+        self.logger.info(
+            "Transform context: "
+            f"task={task.name}, config={config_path}, project_root={project_root}, cwd={Path.cwd()}"
+        )
+
         runner = TransformRunner(
             query_engine_config=query_engine_config,
             project_config=self.project_config,
         )
-        result = runner.run(
-            config_path=config_path,
-            params=params,
-            project_root=str(project_root),
-        )
+        try:
+            result = runner.run(
+                config_path=config_path,
+                params=params,
+                project_root=str(project_root),
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "Transform task failed "
+                f"(task={task.name}, config={config_path}, project_root={project_root}, params={params}): {exc}"
+            ) from exc
 
         # Sync transform outputs to S3 if enabled
         s3_urls = []

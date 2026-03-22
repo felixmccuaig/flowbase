@@ -66,6 +66,7 @@ class TransformRunner:
         outputs: List[Dict[str, Any]] = []
         model_results: List[Dict[str, Any]] = []
         validation_results: List[Dict[str, Any]] = []
+        transform_name = str(resolved.get("name", "unnamed_transform"))
 
         try:
             self._register_sources(engine, resolved.get("sources", []), base_dir)
@@ -81,6 +82,11 @@ class TransformRunner:
                     outputs.append(model_result["output"])
 
             validation_results = self._run_validations(engine, resolved.get("validations", []))
+        except Exception as exc:
+            raise RuntimeError(
+                "Transform execution failed "
+                f"(name={transform_name}, config_path={config_path or '<inline>'}, base_dir={base_dir}): {exc}"
+            ) from exc
         finally:
             engine.close()
 
@@ -136,7 +142,10 @@ class TransformRunner:
                     s3_fallback_error = str(exc)
 
             if required:
-                message = f"Required source '{name}' not found: {source_path}"
+                message = (
+                    f"Required source '{name}' not found: configured_path={source_path}, "
+                    f"resolved_local_path={resolved_path}"
+                )
                 if s3_fallback_path:
                     message += (
                         f" (S3 fallback failed: {s3_fallback_path}"
@@ -148,7 +157,9 @@ class TransformRunner:
             empty_schema = source.get("empty_schema", [])
             if not empty_schema:
                 raise ValueError(
-                    f"Optional source '{name}' not found and no 'empty_schema' provided: {source_path}"
+                    f"Optional source '{name}' not found and no 'empty_schema' provided: "
+                    f"configured_path={source_path}, resolved_local_path={resolved_path}. "
+                    "Either provide 'empty_schema' for this source or mark it required=true."
                 )
             self._create_empty_view(engine, name, empty_schema)
 
@@ -358,23 +369,29 @@ class TransformRunner:
         source_path: str,
     ) -> None:
         escaped_path = self._escape_sql_string(source_path)
-        if source_format == "parquet":
-            engine.conn.execute(
-                f"CREATE OR REPLACE VIEW {view_name} AS "
-                f"SELECT * FROM read_parquet('{escaped_path}', union_by_name=true)"
-            )
-        elif source_format == "csv":
-            engine.conn.execute(
-                f"CREATE OR REPLACE VIEW {view_name} AS "
-                f"SELECT * FROM read_csv_auto('{escaped_path}')"
-            )
-        elif source_format == "json":
-            engine.conn.execute(
-                f"CREATE OR REPLACE VIEW {view_name} AS "
-                f"SELECT * FROM read_json_auto('{escaped_path}')"
-            )
-        else:
-            raise ValueError(f"Unsupported source format: {source_format}")
+        try:
+            if source_format == "parquet":
+                engine.conn.execute(
+                    f"CREATE OR REPLACE VIEW {view_name} AS "
+                    f"SELECT * FROM read_parquet('{escaped_path}', union_by_name=true)"
+                )
+            elif source_format == "csv":
+                engine.conn.execute(
+                    f"CREATE OR REPLACE VIEW {view_name} AS "
+                    f"SELECT * FROM read_csv_auto('{escaped_path}')"
+                )
+            elif source_format == "json":
+                engine.conn.execute(
+                    f"CREATE OR REPLACE VIEW {view_name} AS "
+                    f"SELECT * FROM read_json_auto('{escaped_path}')"
+                )
+            else:
+                raise ValueError(f"Unsupported source format: {source_format}")
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to register source view '{view_name}' "
+                f"(format={source_format}, path={source_path}): {exc}"
+            ) from exc
 
     def _create_empty_view(self, engine: DuckDBEngine, view_name: str, schema_cfg: Any) -> None:
         if not isinstance(schema_cfg, list) or not schema_cfg:

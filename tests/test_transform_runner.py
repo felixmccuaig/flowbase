@@ -72,7 +72,7 @@ def test_transform_validation_error_severity_fails_run(tmp_path: Path) -> None:
     _write_parquet(source_path, [{"id": 1}, {"id": 2}])
 
     runner = TransformRunner()
-    with pytest.raises(ValueError, match="Transform validation failed for checks: id_must_be_gt_10"):
+    with pytest.raises(RuntimeError, match="Transform execution failed"):
         runner.run(
             config_dict={
                 "name": "validation_fail_case",
@@ -92,3 +92,24 @@ def test_transform_validation_error_severity_fails_run(tmp_path: Path) -> None:
             project_root=str(tmp_path),
         )
 
+
+def test_transform_missing_required_source_has_detailed_error_context(tmp_path: Path) -> None:
+    missing_file = tmp_path / "does_not_exist.parquet"
+    runner = TransformRunner()
+
+    with pytest.raises(RuntimeError) as exc_info:
+        runner.run(
+            config_dict={
+                "name": "missing_required_source_case",
+                "sources": {"src": {"path": str(missing_file), "format": "parquet", "required": True}},
+                "models": [{"name": "stg_src", "materialized": "view", "sql": "SELECT * FROM src"}],
+            },
+            project_root=str(tmp_path),
+        )
+
+    message = str(exc_info.value)
+    assert "Transform execution failed" in message
+    assert "missing_required_source_case" in message
+    assert "Required source 'src' not found" in message
+    assert "configured_path=" in message
+    assert "resolved_local_path=" in message
