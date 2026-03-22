@@ -1347,18 +1347,28 @@ class WorkflowRunner:
                     continue
 
                 self.logger.info(f"Syncing transform output to S3: {output_file}")
-                if data_root_path and output_file.is_relative_to(data_root_path):
-                    relative_path = output_file.relative_to(data_root_path)
+                files_to_upload: List[Path]
+                if output_file.is_dir():
+                    files_to_upload = [p for p in output_file.rglob("*") if p.is_file()]
+                    if not files_to_upload:
+                        self.logger.warning(f"No files found under output directory: {output_file}")
+                        continue
                 else:
-                    relative_path = output_file.relative_to(project_root)
+                    files_to_upload = [output_file]
 
-                s3_key = str(relative_path)
-                if self.s3_sync.upload_file(output_file, s3_key):
-                    s3_url = f"s3://{self.s3_sync.bucket}/{self.s3_sync.prefix}/{s3_key}".replace("//", "/")
-                    s3_urls.append(s3_url)
-                    self.logger.info(f"Transform output synced to S3: {s3_url}")
-                else:
-                    self.logger.warning(f"Failed to sync transform output to S3: {output_file}")
+                for local_file in files_to_upload:
+                    if data_root_path and local_file.is_relative_to(data_root_path):
+                        relative_path = local_file.relative_to(data_root_path)
+                    else:
+                        relative_path = local_file.relative_to(project_root)
+
+                    s3_key = str(relative_path)
+                    if self.s3_sync.upload_file(local_file, s3_key):
+                        s3_url = f"s3://{self.s3_sync.bucket}/{self.s3_sync.prefix}/{s3_key}".replace("//", "/")
+                        s3_urls.append(s3_url)
+                        self.logger.info(f"Transform output synced to S3: {s3_url}")
+                    else:
+                        self.logger.warning(f"Failed to sync transform output to S3: {local_file}")
 
         return {
             "type": "transform",
