@@ -1291,16 +1291,7 @@ class WorkflowRunner:
         config_path = self._resolve_task_config_path(task.config, config_dir)
 
         # Find project root and load config for S3 sync
-        search_dir = Path(config_path).parent.resolve()
-        project_root = None
-        while search_dir != search_dir.parent:
-            if (search_dir / "data").exists() or (search_dir / "models").exists():
-                project_root = search_dir
-                break
-            search_dir = search_dir.parent
-
-        if not project_root:
-            project_root = Path(config_path).parent.parent
+        project_root = self._find_project_root(Path(config_path).parent.resolve())
 
         # Load project config if not already loaded
         if not self.project_config:
@@ -1370,6 +1361,30 @@ class WorkflowRunner:
             "outputs": outputs,
             "s3_urls": s3_urls if s3_urls else None,
         }
+
+    def _find_project_root(self, start_dir: Path) -> Path:
+        """Find project root by walking upward from start_dir."""
+        search_dir = start_dir.resolve()
+        fallback: Optional[Path] = None
+
+        while search_dir != search_dir.parent:
+            if (search_dir / "flowbase.yaml").exists():
+                return search_dir
+
+            has_workflows = (search_dir / "workflows").exists()
+            has_data = (search_dir / "data").exists()
+            if has_workflows and has_data:
+                return search_dir
+
+            # Weak fallback: keep the highest directory that looks project-like.
+            if has_data or (search_dir / "models").exists():
+                fallback = search_dir
+
+            search_dir = search_dir.parent
+
+        if fallback:
+            return fallback
+        return start_dir.parent
 
     def _resolve_task_config_path(self, config_path: str, workflow_dir: Path) -> str:
         """Resolve task config path relative to project root."""
