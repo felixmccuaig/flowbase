@@ -65,6 +65,7 @@ class TransformRunner:
         engine = DuckDBEngine(database=database, config=engine_cfg)
         outputs: List[Dict[str, Any]] = []
         model_results: List[Dict[str, Any]] = []
+        validation_results: List[Dict[str, Any]] = []
 
         try:
             self._register_sources(engine, resolved.get("sources", []), base_dir)
@@ -78,6 +79,8 @@ class TransformRunner:
                 model_results.append(model_result)
                 if model_result.get("output"):
                     outputs.append(model_result["output"])
+
+            validation_results = self._run_validations(engine, resolved.get("validations", []))
         finally:
             engine.close()
 
@@ -85,6 +88,7 @@ class TransformRunner:
             "type": "transform",
             "name": resolved.get("name"),
             "models": model_results,
+            "validations": validation_results,
             "outputs": outputs,
         }
 
@@ -185,6 +189,107 @@ class TransformRunner:
             model_result["output"] = output
 
         return model_result
+
+    def _run_validations(self, engine: DuckDBEngine, validations_cfg: Any) -> List[Dict[str, Any]]:
+        if not validations_cfg:
+            return []
+        if not isinstance(validations_cfg, list):
+            raise ValueError("'validations' must be a list")
+
+        results: List[Dict[str, Any]] = []
+        blocking_failures: List[str] = []
+
+        for entry in validations_cfg:
+            if not isinstance(entry, dict):
+                raise ValueError("Each validation entry must be an object")
+
+            name = str(entry.get("name", "")).strip()
+            if not name:
+                raise ValueError("Validation entry missing required 'name'")
+
+            mode = str(entry.get("mode", "failing_rows")).strip().lower()
+            if mode not in {"failing_rows", "metric"}:
+                raise ValueError(
+                    f"Validation '{name}' has unsupported mode '{mode}'. "
+                    "Supported modes: failing_rows, metric"
+                )
+
+            severity = str(entry.get("severity", "error")).strip().lower()
+            if severity not in {"error", "warn"}:
+                raise ValueError(
+                    f"Validation '{name}' has unsupported severity '{severity}'. "
+                    "Supported severities: error, warn"
+                )
+
+            sql = str(entry.get("sql", "")).strip()
+            if not sql:
+                raise ValueError(f"Validation '{name}' missing required 'sql'")
+
+            if mode == "failing_rows":
+                wrapped_sql = f"SELECT COUNT(*) FROM ({sql}) AS validation_failures"
+                row = engine.conn.execute(wrapped_sql).fetchone()
+                failing_rows = int(row[0]) if row and row[0] is not None else 0
+                passed = failing_rows == 0
+                result: Dict[str, Any] = {
+                    "name": name,
+                    "mode": mode,
+                    "severity": severity,
+                    "passed": passed,
+                    "failing_rows": failing_rows,
+                }
+            else:
+                row = engine.conn.execute(sql).fetchone()
+                if row is None or row[0] is None:
+                    raise ValueError(
+                        f"Validation '{name}' in metric mode returned no scalar value"
+                    )
+                metric_value = row[0]
+                operator = str(entry.get("operator", "")).strip().lower()
+                if operator not in {"lt", "lte", "eq", "neq", "gte", "gt"}:
+                    raise ValueError(
+                        f"Validation '{name}' has unsupported operator '{operator}'. "
+                        "Supported operators: lt, lte, eq, neq, gte, gt"
+                    )
+                threshold = entry.get("threshold")
+                if threshold is None:
+                    raise ValueError(
+                        f"Validation '{name}' in metric mode requires 'threshold'"
+                    )
+                passed = self._compare_metric(metric_value, threshold, operator)
+                result = {
+                    "name": name,
+                    "mode": mode,
+                    "severity": severity,
+                    "passed": passed,
+                    "metric_value": metric_value,
+                    "operator": operator,
+                    "threshold": threshold,
+                }
+
+            results.append(result)
+            if not result["passed"] and severity == "error":
+                blocking_failures.append(name)
+
+        if blocking_failures:
+            failures = ", ".join(blocking_failures)
+            raise ValueError(f"Transform validation failed for checks: {failures}")
+
+        return results
+
+    def _compare_metric(self, value: Any, threshold: Any, operator: str) -> bool:
+        if operator == "lt":
+            return value < threshold
+        if operator == "lte":
+            return value <= threshold
+        if operator == "eq":
+            return value == threshold
+        if operator == "neq":
+            return value != threshold
+        if operator == "gte":
+            return value >= threshold
+        if operator == "gt":
+            return value > threshold
+        raise ValueError(f"Unsupported operator: {operator}")
 
     def _write_output(
         self,
