@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+import shutil
+import time
 from glob import glob
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -324,22 +326,156 @@ class TransformRunner:
             raise ValueError(f"Unsupported output format for model '{model_name}': {output_format}")
 
         output_path = Path(self._resolve_data_path(output_path_value, base_dir)).resolve()
-        output_path.parent.mkdir(parents=True, exist_ok=True)
+        partition_column_name = output_cfg.get("partition_column_name")
+        partition_by_expression = output_cfg.get("partition_by_expression")
+        sort_by = output_cfg.get("sort_by")
+        write_mode = str(output_cfg.get("write_mode", "replace_partition")).lower()
+        if write_mode not in {"replace_partition", "append"}:
+            raise ValueError(
+                f"Unsupported write_mode for model '{model_name}': {write_mode}. "
+                "Supported: replace_partition, append"
+            )
 
+        if partition_by_expression and not partition_column_name:
+            raise ValueError(
+                f"Model '{model_name}' output uses partition_by_expression but no partition_column_name"
+            )
+
+        if partition_column_name:
+            return self._write_partitioned_output(
+                engine=engine,
+                model_name=model_name,
+                output_path=output_path,
+                output_format=output_format,
+                row_count=row_count,
+                partition_column_name=str(partition_column_name),
+                partition_by_expression=str(partition_by_expression) if partition_by_expression else None,
+                sort_by=sort_by,
+                write_mode=write_mode,
+            )
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        ordered_select = self._ordered_select_sql(model_name, sort_by)
         escaped_path = self._escape_sql_string(str(output_path))
         if output_format == "parquet":
-            engine.conn.execute(f"COPY (SELECT * FROM {model_name}) TO '{escaped_path}' (FORMAT PARQUET)")
+            engine.conn.execute(f"COPY ({ordered_select}) TO '{escaped_path}' (FORMAT PARQUET)")
         else:
-            engine.conn.execute(
-                f"COPY (SELECT * FROM {model_name}) TO '{escaped_path}' (FORMAT CSV, HEADER TRUE)"
-            )
+            engine.conn.execute(f"COPY ({ordered_select}) TO '{escaped_path}' (FORMAT CSV, HEADER TRUE)")
 
         return {
             "model": model_name,
             "path": str(output_path),
             "format": output_format,
             "row_count": row_count,
+            "partitioned": False,
         }
+
+    def _write_partitioned_output(
+        self,
+        engine: DuckDBEngine,
+        model_name: str,
+        output_path: Path,
+        output_format: str,
+        row_count: int,
+        partition_column_name: str,
+        partition_by_expression: Optional[str],
+        sort_by: Any,
+        write_mode: str,
+    ) -> Dict[str, Any]:
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        source_name = model_name
+        if partition_by_expression:
+            source_name = f"__{model_name}_partitioned"
+            engine.conn.execute(
+                f"CREATE OR REPLACE TEMP VIEW {source_name} AS "
+                f"SELECT *, ({partition_by_expression}) AS {partition_column_name} "
+                f"FROM {model_name}"
+            )
+
+        partitions = engine.conn.execute(
+            f"SELECT DISTINCT {partition_column_name} FROM {source_name}"
+        ).fetchall()
+
+        partition_count = 0
+        written_files = 0
+        order_clause = self._order_clause(sort_by)
+
+        for (partition_value,) in partitions:
+            partition_count += 1
+            segment = self._partition_segment(partition_value)
+            partition_dir = output_path / f"{partition_column_name}={segment}"
+
+            if write_mode == "replace_partition" and partition_dir.exists():
+                shutil.rmtree(partition_dir)
+            partition_dir.mkdir(parents=True, exist_ok=True)
+
+            filename = "data.parquet" if output_format == "parquet" else "data.csv"
+            if write_mode == "append":
+                suffix = int(time.time() * 1000)
+                ext = "parquet" if output_format == "parquet" else "csv"
+                filename = f"data_{suffix}.{ext}"
+            partition_file = partition_dir / filename
+
+            where_clause = self._partition_where_clause(partition_column_name, partition_value)
+            select_sql = f"SELECT * FROM {source_name} WHERE {where_clause}{order_clause}"
+            escaped_path = self._escape_sql_string(str(partition_file))
+
+            if output_format == "parquet":
+                engine.conn.execute(f"COPY ({select_sql}) TO '{escaped_path}' (FORMAT PARQUET)")
+            else:
+                engine.conn.execute(f"COPY ({select_sql}) TO '{escaped_path}' (FORMAT CSV, HEADER TRUE)")
+
+            written_files += 1
+
+        return {
+            "model": model_name,
+            "path": str(output_path),
+            "format": output_format,
+            "row_count": row_count,
+            "partitioned": True,
+            "partition_column_name": partition_column_name,
+            "partition_count": partition_count,
+            "write_mode": write_mode,
+            "written_files": written_files,
+        }
+
+    def _ordered_select_sql(self, model_name: str, sort_by: Any) -> str:
+        return f"SELECT * FROM {model_name}{self._order_clause(sort_by)}"
+
+    def _order_clause(self, sort_by: Any) -> str:
+        if not sort_by:
+            return ""
+        if isinstance(sort_by, str):
+            columns = [x.strip() for x in sort_by.split(",") if x.strip()]
+        elif isinstance(sort_by, list):
+            columns = [str(x).strip() for x in sort_by if str(x).strip()]
+        else:
+            raise ValueError("sort_by must be a string or list of strings")
+        if not columns:
+            return ""
+        for col in columns:
+            self._validate_identifier(col)
+        return f" ORDER BY {', '.join(columns)}"
+
+    def _partition_where_clause(self, column_name: str, value: Any) -> str:
+        if value is None:
+            return f"{column_name} IS NULL"
+        if isinstance(value, str):
+            escaped = self._escape_sql_string(value)
+            return f"{column_name} = '{escaped}'"
+        if isinstance(value, bool):
+            return f"{column_name} = {'TRUE' if value else 'FALSE'}"
+        return f"{column_name} = {value}"
+
+    def _partition_segment(self, value: Any) -> str:
+        if value is None:
+            return "__null__"
+        segment = str(value).strip()
+        if not segment:
+            return "__empty__"
+        segment = re.sub(r"[^A-Za-z0-9._-]", "_", segment)
+        return segment
 
     def _load_model_sql(self, model_cfg: Dict[str, Any], base_dir: Path) -> str:
         inline_sql = model_cfg.get("sql")
