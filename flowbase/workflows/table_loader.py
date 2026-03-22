@@ -146,7 +146,7 @@ class TableLoader:
         if resolved_key:
             s3_pattern = f"s3://{self.s3_bucket}/{resolved_key}"
         else:
-            s3_pattern = f"s3://{self.s3_bucket}/{s3_prefix}/*.{file_format}"
+            s3_pattern = f"s3://{self.s3_bucket}/{s3_prefix}/**/*.{file_format}"
 
         # Create view from S3 files
         self.logger.info(f"Creating view '{table.name}' from {s3_pattern}")
@@ -188,7 +188,7 @@ class TableLoader:
         file_format = storage_config.file_format.value
 
         # Construct S3 path pattern
-        s3_pattern = f"s3://{bucket}/{prefix}*.{file_format}"
+        s3_pattern = f"s3://{bucket}/{prefix}**/*.{file_format}"
 
         # Create view from S3 files
         self.logger.info(f"Creating view '{table.name}' from {s3_pattern}")
@@ -232,7 +232,7 @@ class TableLoader:
 
         resolved_path = None
         if self.slice_date:
-            keys = [str(p.name) for p in base_path.glob(f"*.{file_format}")]
+            keys = [str(p.name) for p in base_path.rglob(f"*.{file_format}")]
             resolved = self._resolve_key_for_slice(table.name, keys)
             if resolved:
                 resolved_path = str(base_path / Path(resolved).name)
@@ -242,10 +242,10 @@ class TableLoader:
 
         # Construct file pattern
         if file_format == 'parquet':
-            pattern = resolved_path or str(base_path / "*.parquet")
+            pattern = resolved_path or str(base_path / "**" / "*.parquet")
             read_function = f"read_parquet('{pattern}')"
         elif file_format == 'csv':
-            pattern = resolved_path or str(base_path / "*.csv")
+            pattern = resolved_path or str(base_path / "**" / "*.csv")
             read_function = f"read_csv_auto('{pattern}')"
         else:
             raise ValueError(f"Unsupported file format: {file_format}")
