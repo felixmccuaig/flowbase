@@ -3,10 +3,17 @@
 from __future__ import annotations
 
 import logging
+from datetime import date
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional, Dict, Any
+from typing import TYPE_CHECKING, Optional, Dict, Any, List
 
 from flowbase.core.config.schemas import SourceType
+from flowbase.storage.manifest import (
+    JsonManifestStore,
+    ResolutionPolicy,
+    infer_entry_from_key,
+    resolve_for_date,
+)
 
 if TYPE_CHECKING:
     from flowbase.query.engines.duckdb_engine import DuckDBEngine
@@ -16,18 +23,32 @@ if TYPE_CHECKING:
 class TableLoader:
     """Loads tables into DuckDB from various sources."""
 
-    def __init__(self, engine: DuckDBEngine, project_config: Optional[Dict[str, Any]] = None, data_root: Optional[str] = None, prefer_s3: bool = True):
+    def __init__(
+        self,
+        engine: DuckDBEngine,
+        project_config: Optional[Dict[str, Any]] = None,
+        data_root: Optional[str] = None,
+        prefer_s3: bool = True,
+        slice_date: Optional[str] = None,
+    ):
         self.engine = engine
         self.logger = logging.getLogger(__name__)
         self.project_config = project_config or {}
         self.data_root = Path(data_root) if data_root else None
         self.prefer_s3 = prefer_s3  # For Lambda: prefer S3 for full historical data
+        self.slice_date = self._parse_slice_date(slice_date)
 
         # Check if S3 sync is enabled from project config
         self.s3_enabled = self.project_config.get('sync_artifacts', False)
         storage_config = self.project_config.get('storage', {})
         self.s3_bucket = storage_config.get('bucket') if isinstance(storage_config, dict) else None
         self.s3_prefix = storage_config.get('prefix', '') if isinstance(storage_config, dict) else ''
+        manifest_config = self.project_config.get("manifest", {})
+        self.resolution_policy = ResolutionPolicy(
+            str(manifest_config.get("resolution_policy", "daily_prefer"))
+        )
+        manifest_path = manifest_config.get("path")
+        self.manifest_store = JsonManifestStore(manifest_path) if manifest_path else None
 
         if self.s3_enabled and self.s3_bucket:
             self.logger.info(f"S3 sync enabled for tables: s3://{self.s3_bucket}/{self.s3_prefix}")
@@ -35,6 +56,8 @@ class TableLoader:
             self.logger.info(f"Using local data root: {self.data_root}")
         if self.prefer_s3 and self.s3_enabled:
             self.logger.info(f"Preferring S3 for full historical data")
+        if self.slice_date:
+            self.logger.info(f"Resolving table slices for date: {self.slice_date.isoformat()}")
 
     def load_table(self, table: TableDependency) -> None:
         """
@@ -101,8 +124,21 @@ class TableLoader:
 
         file_format = storage_config.file_format.value
 
+        # Resolve one object for the target logical date when available.
+        resolved_key = None
+        if self.slice_date:
+            keys = self._list_s3_keys(self.s3_bucket, s3_prefix, file_format)
+            resolved_key = self._resolve_key_for_slice(table.name, keys)
+            if resolved_key:
+                self.logger.info(
+                    f"Resolved S3 object for table {table.name} on {self.slice_date}: {resolved_key}"
+                )
+
         # Construct S3 path pattern
-        s3_pattern = f"s3://{self.s3_bucket}/{s3_prefix}/*.{file_format}"
+        if resolved_key:
+            s3_pattern = f"s3://{self.s3_bucket}/{resolved_key}"
+        else:
+            s3_pattern = f"s3://{self.s3_bucket}/{s3_prefix}/*.{file_format}"
 
         # Create view from S3 files
         self.logger.info(f"Creating view '{table.name}' from {s3_pattern}")
@@ -199,12 +235,22 @@ class TableLoader:
 
         file_format = storage_config.file_format.value
 
+        resolved_path = None
+        if self.slice_date:
+            keys = [str(p.name) for p in base_path.glob(f"*.{file_format}")]
+            resolved = self._resolve_key_for_slice(table.name, keys)
+            if resolved:
+                resolved_path = str(base_path / Path(resolved).name)
+                self.logger.info(
+                    f"Resolved local object for table {table.name} on {self.slice_date}: {resolved_path}"
+                )
+
         # Construct file pattern
         if file_format == 'parquet':
-            pattern = str(base_path / "*.parquet")
+            pattern = resolved_path or str(base_path / "*.parquet")
             read_function = f"read_parquet('{pattern}')"
         elif file_format == 'csv':
-            pattern = str(base_path / "*.csv")
+            pattern = resolved_path or str(base_path / "*.csv")
             read_function = f"read_csv_auto('{pattern}')"
         else:
             raise ValueError(f"Unsupported file format: {file_format}")
@@ -224,6 +270,49 @@ class TableLoader:
         except Exception as e:
             self.logger.error(f"Failed to load table {table.name} from local: {e}")
             raise
+
+    def _parse_slice_date(self, value: Optional[str]) -> Optional[date]:
+        if not value:
+            return None
+        try:
+            return date.fromisoformat(str(value))
+        except ValueError:
+            self.logger.warning(f"Invalid slice_date '{value}', falling back to wildcard loading")
+            return None
+
+    def _resolve_key_for_slice(self, table_name: str, keys: List[str]) -> Optional[str]:
+        entries = []
+        for key in keys:
+            entry = infer_entry_from_key(table_name, key)
+            if entry:
+                entries.append(entry)
+        if not entries or not self.slice_date:
+            return None
+
+        resolved = None
+        if self.manifest_store:
+            resolved = self.manifest_store.resolve_for_date(
+                table=table_name,
+                value=self.slice_date,
+                policy=self.resolution_policy,
+                discovered_entries=entries,
+            )
+        else:
+            resolved = resolve_for_date(entries, self.slice_date, policy=self.resolution_policy)
+        return resolved.key if resolved else None
+
+    def _list_s3_keys(self, bucket: str, prefix: str, file_format: str) -> List[str]:
+        import boto3
+
+        s3 = boto3.client("s3")
+        paginator = s3.get_paginator("list_objects_v2")
+        keys: List[str] = []
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+            for item in page.get("Contents", []):
+                key = str(item.get("Key", ""))
+                if key.endswith(f".{file_format}"):
+                    keys.append(key)
+        return keys
 
 
 __all__ = ['TableLoader']

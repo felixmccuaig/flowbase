@@ -684,7 +684,12 @@ class WorkflowRunner:
                 # Check for data_root environment variable for Lambda support
                 import os
                 data_root = os.environ.get('FLOWBASE_DATA_ROOT')
-                loader = TableLoader(engine, project_config=self.project_config, data_root=data_root)
+                loader = TableLoader(
+                    engine,
+                    project_config=self.project_config,
+                    data_root=data_root,
+                    slice_date=str(params.get("date")) if params.get("date") is not None else None,
+                )
 
                 for table in tables:
                     try:
