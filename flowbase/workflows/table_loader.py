@@ -30,6 +30,7 @@ class TableLoader:
         data_root: Optional[str] = None,
         prefer_s3: bool = True,
         slice_date: Optional[str] = None,
+        run_intent: Optional[str] = None,
     ):
         self.engine = engine
         self.logger = logging.getLogger(__name__)
@@ -37,6 +38,7 @@ class TableLoader:
         self.data_root = Path(data_root) if data_root else None
         self.prefer_s3 = prefer_s3  # For Lambda: prefer S3 for full historical data
         self.slice_date = self._parse_slice_date(slice_date)
+        self.run_intent = (run_intent or "daily").strip().lower()
 
         # Check if S3 sync is enabled from project config
         self.s3_enabled = self.project_config.get('sync_artifacts', False)
@@ -49,6 +51,16 @@ class TableLoader:
         )
         manifest_path = manifest_config.get("path")
         self.manifest_store = JsonManifestStore(manifest_path) if manifest_path else None
+        profile_map = self.project_config.get("storage_profile_map", {})
+        if not isinstance(profile_map, dict):
+            profile_map = {}
+        self.storage_profile_map = {
+            "daily": "raw_append",
+            "backfill": "rollup_cold",
+            "features": "serving_entity",
+            "inference": "serving_entity",
+            **{str(k): str(v) for k, v in profile_map.items()},
+        }
 
         if self.s3_enabled and self.s3_bucket:
             self.logger.info(f"S3 sync enabled for tables: s3://{self.s3_bucket}/{self.s3_prefix}")
@@ -58,6 +70,7 @@ class TableLoader:
             self.logger.info(f"Preferring S3 for full historical data")
         if self.slice_date:
             self.logger.info(f"Resolving table slices for date: {self.slice_date.isoformat()}")
+        self.logger.info(f"Run intent for table loading: {self.run_intent}")
 
     def load_table(self, table: TableDependency) -> None:
         """
@@ -69,46 +82,41 @@ class TableLoader:
         self.logger.info(f"Loading table: {table.name}")
 
         config = table.config
+        selected_storage, selected_profile = self._select_storage_config(config)
+        if not selected_storage:
+            self.logger.error(f"No storage config found for table {table.name}")
+            return
+        if selected_profile:
+            self.logger.info(f"Using storage profile '{selected_profile}' for table {table.name}")
 
         # Priority: 1) Explicit S3 source, 2) S3 if prefer_s3 is True, 3) Local with S3 fallback
         if config.source and config.source.type == SourceType.S3:
             # Explicit S3 source in table config
-            self._load_from_s3(table)
+            self._load_from_s3(table, selected_storage)
         elif self.prefer_s3 and self.s3_enabled and self.s3_bucket:
             # In Lambda: prefer S3 to get full historical data, not just today's /tmp file
             self.logger.info(f"Loading table {table.name} from S3 (full historical data)")
-            self._load_from_s3_auto(table)
+            self._load_from_s3_auto(table, selected_storage)
         elif self.data_root:
             # Local with S3 fallback (for non-feature workflows)
-            storage_config = config.storage_config
-            if storage_config:
-                base_path = self.data_root / Path(storage_config.base_path)
-                if base_path.exists():
-                    self.logger.info(f"Loading table {table.name} from local /tmp")
-                    self._load_from_local(table)
-                elif self.s3_enabled and self.s3_bucket:
-                    self.logger.info(f"Local path not found, loading table {table.name} from S3")
-                    self._load_from_s3_auto(table)
-                else:
-                    self.logger.warning(f"Table {table.name} not found locally or in S3")
+            base_path = self.data_root / Path(selected_storage.base_path)
+            if base_path.exists():
+                self.logger.info(f"Loading table {table.name} from local /tmp")
+                self._load_from_local(table, selected_storage)
+            elif self.s3_enabled and self.s3_bucket:
+                self.logger.info(f"Local path not found, loading table {table.name} from S3")
+                self._load_from_s3_auto(table, selected_storage)
             else:
-                self._load_from_local(table)
+                self.logger.warning(f"Table {table.name} not found locally or in S3")
         elif self.s3_enabled and self.s3_bucket:
             # Project-level S3 sync enabled - auto-construct S3 path from storage.base_path
-            self._load_from_s3_auto(table)
+            self._load_from_s3_auto(table, selected_storage)
         else:
             # Local source
-            self._load_from_local(table)
+            self._load_from_local(table, selected_storage)
 
-    def _load_from_s3_auto(self, table: TableDependency) -> None:
+    def _load_from_s3_auto(self, table: TableDependency, storage_config: Any) -> None:
         """Load table from S3 using auto-constructed path from project config."""
-        config = table.config
-        storage_config = config.storage_config
-
-        if not storage_config:
-            self.logger.error(f"No storage config found for table {table.name}")
-            return
-
         # Auto-construct S3 path: s3://{bucket}/{prefix}/{storage.base_path}
         base_path = storage_config.base_path
         s3_prefix = f"{self.s3_prefix}/{base_path}".strip("/")
@@ -160,9 +168,9 @@ class TableLoader:
             self.logger.error(f"Failed to load table {table.name} from S3: {e}")
             # Try local fallback
             self.logger.info(f"Attempting local fallback for table {table.name}")
-            self._load_from_local(table)
+            self._load_from_local(table, storage_config)
 
-    def _load_from_s3(self, table: TableDependency) -> None:
+    def _load_from_s3(self, table: TableDependency, storage_config: Any) -> None:
         """Load table from S3 using explicit S3 source config."""
         config = table.config
         bucket = config.source.bucket
@@ -176,12 +184,6 @@ class TableLoader:
             self.engine.execute("LOAD httpfs;")
         except Exception as e:
             self.logger.debug(f"httpfs extension already installed: {e}")
-
-        # Get file format
-        storage_config = config.storage_config
-        if not storage_config:
-            self.logger.error(f"No storage config found for table {table.name}")
-            return
 
         file_format = storage_config.file_format.value
 
@@ -208,17 +210,10 @@ class TableLoader:
             self.logger.error(f"Failed to load table {table.name} from S3: {e}")
             # Try local fallback
             self.logger.info(f"Attempting local fallback for table {table.name}")
-            self._load_from_local(table)
+            self._load_from_local(table, storage_config)
 
-    def _load_from_local(self, table: TableDependency) -> None:
+    def _load_from_local(self, table: TableDependency, storage_config: Any) -> None:
         """Load table from local filesystem."""
-        config = table.config
-        storage_config = config.storage_config
-
-        if not storage_config:
-            self.logger.error(f"No storage config found for table {table.name}")
-            return
-
         base_path = Path(storage_config.base_path)
 
         # Prepend data_root if specified (for Lambda /tmp support)
@@ -313,6 +308,15 @@ class TableLoader:
                 if key.endswith(f".{file_format}"):
                     keys.append(key)
         return keys
+
+    def _select_storage_config(self, table_config: Any) -> tuple[Optional[Any], Optional[str]]:
+        """Choose storage config based on run intent and profile mapping."""
+        profile = self.storage_profile_map.get(self.run_intent)
+        if profile:
+            selected = table_config.get_storage_config(profile)
+            if selected is not None:
+                return selected, profile
+        return table_config.storage_config, None
 
 
 __all__ = ['TableLoader']

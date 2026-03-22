@@ -689,6 +689,7 @@ class WorkflowRunner:
                     project_config=self.project_config,
                     data_root=data_root,
                     slice_date=str(params.get("date")) if params.get("date") is not None else None,
+                    run_intent=str(params.get("run_intent", "features")),
                 )
 
                 for table in tables:

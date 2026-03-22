@@ -87,12 +87,21 @@ class TableConfig:
     source: Optional[TableSource] = None
     storage: Optional[TableStorage] = None
     destination: Optional[TableStorage] = None  # Alternative name for storage
+    storage_profiles: Dict[str, TableStorage] = field(default_factory=dict)
     partitioning: Optional[TablePartitioning] = None
 
     @property
     def storage_config(self) -> Optional[TableStorage]:
         """Get storage config (supports both 'storage' and 'destination' keys)."""
         return self.storage or self.destination
+
+    def get_storage_config(self, profile: Optional[str] = None) -> Optional[TableStorage]:
+        """Get storage config for a named profile, falling back to default storage."""
+        if profile:
+            prof = self.storage_profiles.get(profile)
+            if prof:
+                return prof
+        return self.storage_config
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> TableConfig:
@@ -110,6 +119,13 @@ class TableConfig:
         destination_data = data.get('destination')
         destination = TableStorage.from_dict(destination_data) if destination_data else None
 
+        storage_profiles_data = data.get('storage_profiles', {})
+        storage_profiles: Dict[str, TableStorage] = {}
+        if isinstance(storage_profiles_data, dict):
+            for profile_name, profile_cfg in storage_profiles_data.items():
+                if isinstance(profile_cfg, dict):
+                    storage_profiles[profile_name] = TableStorage.from_dict(profile_cfg)
+
         partitioning_data = data.get('partitioning')
         partitioning = TablePartitioning.from_dict(partitioning_data) if partitioning_data else None
 
@@ -119,6 +135,7 @@ class TableConfig:
             source=source,
             storage=storage,
             destination=destination,
+            storage_profiles=storage_profiles,
             partitioning=partitioning
         )
 
