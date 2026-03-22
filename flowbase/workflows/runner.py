@@ -13,6 +13,8 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
+from flowbase.incremental import ChangeEvent, IncrementalPlanner, build_graph_from_workflow_tasks
+
 
 class TaskType(str, Enum):
     """Supported task types in workflows."""
@@ -58,6 +60,8 @@ class WorkflowTask:
     params: Dict[str, Any]
     condition: Optional[str] = None
     predicate: Optional[str] = None
+    grain: Optional[Dict[str, Any]] = None
+    incremental: Optional[Dict[str, Any]] = None
 
 
 class WorkflowRunner:
@@ -211,6 +215,7 @@ class WorkflowRunner:
         params: Optional[Dict[str, Any]] = None,
         config_path: Optional[str] = None,
         dry_run: bool = False,
+        changes: Optional[List[Dict[str, Any] | ChangeEvent]] = None,
     ) -> Dict[str, Any]:
         """
         Execute a workflow.
@@ -220,6 +225,7 @@ class WorkflowRunner:
             params: Runtime parameters (override config params)
             config_path: Optional explicit path to workflow config
             dry_run: If True, only validate and plan, don't execute
+            changes: Optional source change events for incremental dry-run planning
 
         Returns:
             Dictionary with workflow execution results
@@ -244,12 +250,27 @@ class WorkflowRunner:
         execution_order = self._build_execution_plan(tasks)
 
         if dry_run:
+            incremental_plan = None
+            normalized_changes: List[ChangeEvent] = []
+            if changes:
+                normalized_changes = [
+                    change if isinstance(change, ChangeEvent) else ChangeEvent.from_dict(change)
+                    for change in changes
+                ]
+                planner = IncrementalPlanner()
+                graph = build_graph_from_workflow_tasks(execution_order)
+                planned_units = planner.plan(normalized_changes, graph)
+                incremental_plan = {
+                    "changes": [self._change_to_dict(change) for change in normalized_changes],
+                    "work_units": [self._work_unit_to_dict(unit) for unit in planned_units],
+                }
             return {
                 "workflow": config.get("name", workflow_name),
                 "config_path": str(config_file),
                 "template_vars": template_vars,
                 "execution_plan": [t.name for t in execution_order],
                 "tasks": [self._task_to_dict(t) for t in execution_order],
+                "incremental_plan": incremental_plan,
                 "dry_run": True,
             }
 
@@ -412,6 +433,8 @@ class WorkflowRunner:
             params = entry.get("params", {})
             condition = entry.get("condition")
             predicate = entry.get("predicate")
+            grain = entry.get("grain")
+            incremental = entry.get("incremental")
 
             tasks.append(WorkflowTask(
                 name=str(name),
@@ -421,6 +444,8 @@ class WorkflowRunner:
                 params=params,
                 condition=condition,
                 predicate=predicate,
+                grain=grain if isinstance(grain, dict) else None,
+                incremental=incremental if isinstance(incremental, dict) else None,
             ))
 
         return tasks
@@ -1489,6 +1514,33 @@ class WorkflowRunner:
             "params": task.params,
             "condition": task.condition,
             "predicate": task.predicate,
+            "grain": task.grain,
+            "incremental": task.incremental,
+        }
+
+    def _change_to_dict(self, change: ChangeEvent) -> Dict[str, Any]:
+        """Convert incremental change event to dictionary for output."""
+        return {
+            "source_name": change.source_name,
+            "change_type": change.change_type,
+            "primary_key": change.primary_key,
+            "entity_keys": change.entity_keys,
+            "partition_keys": change.partition_keys,
+            "event_time": change.event_time,
+            "observed_at": change.observed_at,
+            "version": change.version,
+            "idempotency_key": change.idempotency_key,
+            "payload_ref": change.payload_ref,
+        }
+
+    def _work_unit_to_dict(self, unit: Any) -> Dict[str, Any]:
+        """Convert planner work unit to dictionary for output."""
+        return {
+            "node_name": unit.node_name,
+            "grain_type": unit.grain_type,
+            "keys": unit.keys,
+            "reason": unit.reason,
+            "source_change_ids": list(unit.source_change_ids),
         }
 
     def _result_to_dict(self, result: TaskResult) -> Dict[str, Any]:

@@ -24,6 +24,84 @@ class FileFormat(str, Enum):
     JSON = "json"
 
 
+@dataclass
+class GrainConfig:
+    """Logical recompute grain for a dataset, feature set, or table."""
+
+    type: str = "partition"  # partition | key | entity | range
+    primary_key: List[str] = field(default_factory=list)
+    partition_by: List[str] = field(default_factory=list)
+    entity_keys: List[str] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> GrainConfig:
+        return cls(
+            type=str(data.get("type", "partition")),
+            primary_key=[str(v) for v in data.get("primary_key", [])],
+            partition_by=[str(v) for v in data.get("partition_by", [])],
+            entity_keys=[str(v) for v in data.get("entity_keys", [])],
+        )
+
+
+@dataclass
+class WatermarkConfig:
+    """Late-arrival and event-time policy for incremental planning."""
+
+    mode: str = "event_time"
+    allowed_lateness: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> WatermarkConfig:
+        return cls(
+            mode=str(data.get("mode", "event_time")),
+            allowed_lateness=data.get("allowed_lateness"),
+        )
+
+
+@dataclass
+class ChangePropagationRule:
+    """How source changes map into downstream recompute keys."""
+
+    source: str
+    match_on: List[str] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> ChangePropagationRule:
+        return cls(
+            source=str(data["source"]),
+            match_on=[str(v) for v in data.get("match_on", [])],
+        )
+
+
+@dataclass
+class IncrementalConfig:
+    """Incremental materialization metadata."""
+
+    strategy: str = "full_refresh"
+    change_propagation: List[ChangePropagationRule] = field(default_factory=list)
+    watermark: Optional[WatermarkConfig] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> IncrementalConfig:
+        propagation_data = data.get("change_propagation", {})
+        from_sources = []
+        if isinstance(propagation_data, dict):
+            from_sources = propagation_data.get("from_sources", [])
+        elif isinstance(propagation_data, list):
+            from_sources = propagation_data
+
+        watermark_data = data.get("watermark")
+        return cls(
+            strategy=str(data.get("strategy", "full_refresh")),
+            change_propagation=[
+                ChangePropagationRule.from_dict(item)
+                for item in from_sources
+                if isinstance(item, dict) and item.get("source")
+            ],
+            watermark=WatermarkConfig.from_dict(watermark_data) if watermark_data else None,
+        )
+
+
 # ============================================================================
 # Table Configuration
 # ============================================================================
@@ -89,6 +167,8 @@ class TableConfig:
     destination: Optional[TableStorage] = None  # Alternative name for storage
     storage_profiles: Dict[str, TableStorage] = field(default_factory=dict)
     partitioning: Optional[TablePartitioning] = None
+    grain: Optional[GrainConfig] = None
+    incremental: Optional[IncrementalConfig] = None
 
     @property
     def storage_config(self) -> Optional[TableStorage]:
@@ -128,6 +208,10 @@ class TableConfig:
 
         partitioning_data = data.get('partitioning')
         partitioning = TablePartitioning.from_dict(partitioning_data) if partitioning_data else None
+        grain_data = data.get("grain")
+        grain = GrainConfig.from_dict(grain_data) if grain_data else None
+        incremental_data = data.get("incremental")
+        incremental = IncrementalConfig.from_dict(incremental_data) if incremental_data else None
 
         return cls(
             name=data['name'],
@@ -136,7 +220,9 @@ class TableConfig:
             storage=storage,
             destination=destination,
             storage_profiles=storage_profiles,
-            partitioning=partitioning
+            partitioning=partitioning,
+            grain=grain,
+            incremental=incremental,
         )
 
     @classmethod
@@ -245,6 +331,8 @@ class DatasetConfig:
     join: Optional[DatasetJoin] = None
     columns: List[DatasetColumn] = field(default_factory=list)
     filters: List[DatasetFilter] = field(default_factory=list)
+    grain: Optional[GrainConfig] = None
+    incremental: Optional[IncrementalConfig] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> DatasetConfig:
@@ -264,6 +352,8 @@ class DatasetConfig:
 
         columns = [DatasetColumn.from_dict(c) for c in data.get('columns', [])]
         filters = [DatasetFilter.from_dict(f) for f in data.get('filters', [])]
+        grain_data = data.get("grain")
+        incremental_data = data.get("incremental")
 
         return cls(
             name=data['name'],
@@ -272,7 +362,9 @@ class DatasetConfig:
             sources=sources,
             join=join,
             columns=columns,
-            filters=filters
+            filters=filters,
+            grain=GrainConfig.from_dict(grain_data) if grain_data else None,
+            incremental=IncrementalConfig.from_dict(incremental_data) if incremental_data else None,
         )
 
     @classmethod
@@ -345,6 +437,8 @@ class FeatureConfig:
     # Declarative feature engineering config
     entity_id_column: Optional[str] = None
     time_column: Optional[str] = None
+    grain: Optional[GrainConfig] = None
+    incremental: Optional[IncrementalConfig] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> FeatureConfig:
@@ -357,6 +451,8 @@ class FeatureConfig:
         source = FeatureSource.from_dict(source_data) if source_data else None
 
         features = [FeatureDefinition.from_dict(f) for f in data.get('features', [])]
+        grain_data = data.get("grain")
+        incremental_data = data.get("incremental")
 
         return cls(
             name=data['name'],
@@ -364,7 +460,9 @@ class FeatureConfig:
             source=source,
             features=features,
             entity_id_column=data.get('entity_id_column'),
-            time_column=data.get('time_column')
+            time_column=data.get('time_column'),
+            grain=GrainConfig.from_dict(grain_data) if grain_data else None,
+            incremental=IncrementalConfig.from_dict(incremental_data) if incremental_data else None,
         )
 
     @classmethod
@@ -378,6 +476,10 @@ class FeatureConfig:
 __all__ = [
     'SourceType',
     'FileFormat',
+    'GrainConfig',
+    'WatermarkConfig',
+    'ChangePropagationRule',
+    'IncrementalConfig',
     'TableSource',
     'TableStorage',
     'TablePartitioning',

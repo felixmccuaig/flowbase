@@ -1,0 +1,28 @@
+[
+  {
+    "node_name": "normalize_signals",
+    "grain_type": "key",
+    "keys": {
+      "race_date": "2026-01-01",
+      "race_number": 1,
+      "dog_key": "dog-1"
+    },
+    "reason": "source:grv_signals"
+  },
+  {
+    "node_name": "refresh_race_partition",
+    "grain_type": "partition",
+    "keys": {
+      "race_date": "2026-01-01"
+    },
+    "reason": "downstream_of:normalize_signals"
+  },
+  {
+    "node_name": "update_dog_state",
+    "grain_type": "entity",
+    "keys": {
+      "dog_key": "dog-1"
+    },
+    "reason": "downstream_of:normalize_signals"
+  }
+]
