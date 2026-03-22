@@ -108,6 +108,53 @@ class WorkflowRunner:
         except Exception as e:
             self.logger.warning(f"Failed to load project config: {e}")
 
+    @staticmethod
+    def _coerce_bool(value: Any) -> Optional[bool]:
+        """Best-effort bool coercion for YAML config values."""
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "off"}:
+                return False
+        return None
+
+    def _resolve_table_loader_prefer_s3(self, run_intent: str) -> bool:
+        """
+        Decide whether TableLoader should prefer S3 over local files.
+
+        Defaults:
+        - features/inference: local-first (False)
+        - daily/backfill/other intents: S3-first (True)
+
+        Optional override in flowbase.yaml:
+        table_loader_prefer_s3:
+          default: true
+          features: false
+          inference: false
+          backfill: true
+        """
+        intent = (run_intent or "daily").strip().lower()
+        prefer_s3 = intent not in {"features", "inference"}
+
+        config = self.project_config if isinstance(self.project_config, dict) else {}
+        overrides = config.get("table_loader_prefer_s3", {})
+        if isinstance(overrides, dict):
+            if intent in overrides:
+                parsed = self._coerce_bool(overrides.get(intent))
+                if parsed is not None:
+                    return parsed
+            if "default" in overrides:
+                parsed = self._coerce_bool(overrides.get("default"))
+                if parsed is not None:
+                    return parsed
+
+        return prefer_s3
+
     def _setup_logging(self, workflow_name: str) -> None:
         """Set up logging for a workflow run."""
         import os
@@ -684,12 +731,20 @@ class WorkflowRunner:
                 # Check for data_root environment variable for Lambda support
                 import os
                 data_root = os.environ.get('FLOWBASE_DATA_ROOT')
+                run_intent = str(params.get("run_intent", "features"))
+                prefer_s3 = self._resolve_table_loader_prefer_s3(run_intent)
+                self.logger.info(
+                    f"Table loading mode for intent '{run_intent}': "
+                    f"{'s3-first' if prefer_s3 else 'local-first'}"
+                )
+
                 loader = TableLoader(
                     engine,
                     project_config=self.project_config,
                     data_root=data_root,
+                    prefer_s3=prefer_s3,
                     slice_date=str(params.get("date")) if params.get("date") is not None else None,
-                    run_intent=str(params.get("run_intent", "features")),
+                    run_intent=run_intent,
                 )
 
                 for table in tables:
