@@ -1,6 +1,7 @@
 from flowbase.core.config.schemas import FileFormat, TableConfig
 from flowbase.query.engines.duckdb_engine import DuckDBEngine
 from flowbase.workflows.table_loader import TableLoader
+from types import SimpleNamespace
 
 
 def _table_config_with_profiles() -> TableConfig:
@@ -50,3 +51,65 @@ def test_table_loader_selects_profile_by_run_intent() -> None:
     finally:
         engine.close()
 
+
+def test_table_loader_local_first_prefers_local_when_available(tmp_path) -> None:
+    local_base = tmp_path / "serving_table"
+    local_base.mkdir(parents=True)
+
+    cfg = TableConfig.from_dict(
+        {
+            "name": "runner_feature_serving",
+            "storage": {"base_path": str(local_base), "format": "parquet"},
+        }
+    )
+    table = SimpleNamespace(name="runner_feature_serving", config=cfg)
+    engine = DuckDBEngine()
+    try:
+        loader = TableLoader(
+            engine,
+            project_config={
+                "sync_artifacts": True,
+                "storage": {"bucket": "dummy-bucket", "prefix": "dummy-prefix"},
+            },
+            prefer_s3=False,
+            run_intent="features",
+        )
+        calls: list[str] = []
+        loader._load_from_local = lambda *_args, **_kwargs: calls.append("local")  # type: ignore[assignment]
+        loader._load_from_s3_auto = lambda *_args, **_kwargs: calls.append("s3")  # type: ignore[assignment]
+
+        loader.load_table(table)  # type: ignore[arg-type]
+        assert calls == ["local"]
+    finally:
+        engine.close()
+
+
+def test_table_loader_local_first_falls_back_to_s3_when_local_missing(tmp_path) -> None:
+    local_base = tmp_path / "missing_serving_table"
+
+    cfg = TableConfig.from_dict(
+        {
+            "name": "runner_feature_serving",
+            "storage": {"base_path": str(local_base), "format": "parquet"},
+        }
+    )
+    table = SimpleNamespace(name="runner_feature_serving", config=cfg)
+    engine = DuckDBEngine()
+    try:
+        loader = TableLoader(
+            engine,
+            project_config={
+                "sync_artifacts": True,
+                "storage": {"bucket": "dummy-bucket", "prefix": "dummy-prefix"},
+            },
+            prefer_s3=False,
+            run_intent="features",
+        )
+        calls: list[str] = []
+        loader._load_from_local = lambda *_args, **_kwargs: calls.append("local")  # type: ignore[assignment]
+        loader._load_from_s3_auto = lambda *_args, **_kwargs: calls.append("s3")  # type: ignore[assignment]
+
+        loader.load_table(table)  # type: ignore[arg-type]
+        assert calls == ["s3"]
+    finally:
+        engine.close()

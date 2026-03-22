@@ -89,10 +89,25 @@ class TableLoader:
         if selected_profile:
             self.logger.info(f"Using storage profile '{selected_profile}' for table {table.name}")
 
-        # Priority: 1) Explicit S3 source, 2) S3 if prefer_s3 is True, 3) Local with S3 fallback
+        # Priority:
+        # 1) Explicit S3 source
+        # 2) Local-first (when prefer_s3=False), with S3 fallback
+        # 3) S3-first (when prefer_s3=True), with local fallback
         if config.source and config.source.type == SourceType.S3:
             # Explicit S3 source in table config
             self._load_from_s3(table, selected_storage)
+        elif not self.prefer_s3:
+            local_base_path = self._resolve_local_base_path(selected_storage)
+            if local_base_path.exists():
+                self.logger.info(f"Loading table {table.name} from local (local-first mode)")
+                self._load_from_local(table, selected_storage)
+            elif self.s3_enabled and self.s3_bucket:
+                self.logger.info(
+                    f"Local path not found for {table.name}, falling back to S3 in local-first mode"
+                )
+                self._load_from_s3_auto(table, selected_storage)
+            else:
+                self.logger.warning(f"Table {table.name} not found locally and S3 is unavailable")
         elif self.prefer_s3 and self.s3_enabled and self.s3_bucket:
             # In Lambda: prefer S3 to get full historical data, not just today's /tmp file
             self.logger.info(f"Loading table {table.name} from S3 (full historical data)")
@@ -114,6 +129,13 @@ class TableLoader:
         else:
             # Local source
             self._load_from_local(table, selected_storage)
+
+    def _resolve_local_base_path(self, storage_config: Any) -> Path:
+        """Resolve absolute local base path for storage config."""
+        base_path = Path(storage_config.base_path)
+        if self.data_root:
+            return self.data_root / base_path
+        return base_path
 
     def _load_from_s3_auto(self, table: TableDependency, storage_config: Any) -> None:
         """Load table from S3 using auto-constructed path from project config."""
