@@ -19,8 +19,19 @@ _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 class TransformRunner:
     """Runs declarative SQL transform configs."""
 
-    def __init__(self, query_engine_config: Optional[Dict[str, Any]] = None):
+    def __init__(
+        self,
+        query_engine_config: Optional[Dict[str, Any]] = None,
+        project_config: Optional[Dict[str, Any]] = None,
+    ):
         self.query_engine_config = query_engine_config or {}
+        self.project_config = project_config or {}
+        storage = self.project_config.get("storage", {})
+        if not isinstance(storage, dict):
+            storage = {}
+        self.s3_bucket = storage.get("bucket")
+        self.s3_prefix = storage.get("prefix", "")
+        self._s3_ready = False
 
     def run(
         self,
@@ -109,8 +120,26 @@ class TransformRunner:
                     self._register_source_view(engine, name, source_format, abs_path)
                 continue
 
+            # Local file missing: if project S3 storage is configured, try same path on S3.
+            s3_fallback_path = self._build_s3_fallback_path(source_path)
+            s3_fallback_error = None
+            if s3_fallback_path:
+                try:
+                    self._ensure_s3_ready(engine)
+                    self._register_source_view(engine, name, source_format, s3_fallback_path)
+                    continue
+                except Exception as exc:
+                    s3_fallback_error = str(exc)
+
             if required:
-                raise FileNotFoundError(f"Required source '{name}' not found: {source_path}")
+                message = f"Required source '{name}' not found: {source_path}"
+                if s3_fallback_path:
+                    message += (
+                        f" (S3 fallback failed: {s3_fallback_path}"
+                        + (f" [{s3_fallback_error}]" if s3_fallback_error else "")
+                        + ")"
+                    )
+                raise FileNotFoundError(message)
 
             empty_schema = source.get("empty_schema", [])
             if not empty_schema:
@@ -261,6 +290,38 @@ class TransformRunner:
         engine.conn.execute(
             f"CREATE OR REPLACE VIEW {view_name} AS SELECT {select_clause} WHERE FALSE"
         )
+
+    def _ensure_s3_ready(self, engine: DuckDBEngine) -> None:
+        if self._s3_ready:
+            return
+
+        try:
+            engine.conn.execute("INSTALL httpfs")
+        except Exception:
+            pass
+        engine.conn.execute("LOAD httpfs")
+
+        import os
+
+        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+        if region:
+            escaped = self._escape_sql_string(region)
+            engine.conn.execute(f"SET s3_region='{escaped}'")
+
+        self._s3_ready = True
+
+    def _build_s3_fallback_path(self, source_path: str) -> Optional[str]:
+        if source_path.startswith("s3://"):
+            return source_path
+        if not self.s3_bucket:
+            return None
+        if Path(source_path).is_absolute():
+            return None
+
+        key = "/".join(
+            segment for segment in [str(self.s3_prefix).strip("/"), source_path.strip("/")] if segment
+        )
+        return f"s3://{self.s3_bucket}/{key}"
 
     def _normalize_sources(self, sources_cfg: Any) -> List[Dict[str, Any]]:
         if isinstance(sources_cfg, dict):

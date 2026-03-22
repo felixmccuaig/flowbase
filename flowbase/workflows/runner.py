@@ -1310,7 +1310,10 @@ class WorkflowRunner:
         if self.project_config:
             query_engine_config = self.project_config.get("query_engine_config")
 
-        runner = TransformRunner(query_engine_config=query_engine_config)
+        runner = TransformRunner(
+            query_engine_config=query_engine_config,
+            project_config=self.project_config,
+        )
         result = runner.run(
             config_path=config_path,
             params=params,
