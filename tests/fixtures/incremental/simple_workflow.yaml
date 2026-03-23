@@ -1,42 +1,42 @@
 name: fixture_incremental_demo
 params: {}
 tasks:
-  - name: normalize_signals
+  - name: normalize_source_records
     type: custom
     config: dummy.yaml
     incremental:
       strategy: key_upsert
-      sources: [grv_signals]
+      sources: [source_records]
     grain:
       type: key
-      primary_key: [race_date, race_number, dog_key]
+      primary_key: [partition_date, group_id, entity_id]
 
-  - name: update_dog_state
+  - name: update_entity_state
     type: custom
     config: dummy.yaml
-    depends_on: [normalize_signals]
+    depends_on: [normalize_source_records]
     incremental:
       strategy: entity_state_update
       change_propagation:
-        - upstream: normalize_signals
+        - upstream: normalize_source_records
           propagation_mode: entity
           key_mapping:
-            dog_key: dog_key
+            entity_id: entity_id
     grain:
       type: entity
-      entity_keys: [dog_key]
+      entity_keys: [entity_id]
 
-  - name: refresh_race_partition
+  - name: refresh_partition_slice
     type: custom
     config: dummy.yaml
-    depends_on: [normalize_signals]
+    depends_on: [normalize_source_records]
     incremental:
       strategy: partition_replace
       change_propagation:
-        - upstream: normalize_signals
+        - upstream: normalize_source_records
           propagation_mode: partition
           key_mapping:
-            race_date: race_date
+            partition_date: partition_date
     grain:
       type: partition
-      partition_by: [race_date]
+      partition_by: [partition_date]

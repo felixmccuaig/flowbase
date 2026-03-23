@@ -8,21 +8,21 @@ def test_table_config_parses_grain_and_incremental_metadata(tmp_path: Path) -> N
     config_path.write_text(
         """
 table:
-  name: runner_event_core
+  name: entity_event_core
   storage:
     base_path: data/marts
     file_format: parquet
   grain:
     type: key
-    primary_key: [race_date, race_number, dog_key]
-    partition_by: [race_date]
-    entity_keys: [dog_key]
+    primary_key: [partition_date, group_id, entity_id]
+    partition_by: [partition_date]
+    entity_keys: [entity_id]
   incremental:
     strategy: key_upsert
     change_propagation:
       from_sources:
-        - source: grv_signals
-          match_on: [race_date, race_number, dog_key]
+        - source: source_records
+          match_on: [partition_date, group_id, entity_id]
     watermark:
       mode: event_time
       allowed_lateness: 6h
@@ -34,12 +34,12 @@ table:
 
     assert config.grain is not None
     assert config.grain.type == "key"
-    assert config.grain.primary_key == ["race_date", "race_number", "dog_key"]
-    assert config.grain.partition_by == ["race_date"]
+    assert config.grain.primary_key == ["partition_date", "group_id", "entity_id"]
+    assert config.grain.partition_by == ["partition_date"]
     assert config.incremental is not None
     assert config.incremental.strategy == "key_upsert"
     assert len(config.incremental.change_propagation) == 1
-    assert config.incremental.change_propagation[0].source == "grv_signals"
+    assert config.incremental.change_propagation[0].source == "source_records"
     assert config.incremental.watermark is not None
     assert config.incremental.watermark.allowed_lateness == "6h"
 
@@ -48,10 +48,10 @@ def test_dataset_and_feature_configs_parse_incremental_blocks() -> None:
     dataset = DatasetConfig.from_dict(
         {
             "dataset": {
-                "name": "runner_event_dataset",
+                "name": "entity_event_dataset",
                 "grain": {
                     "type": "partition",
-                    "partition_by": ["race_date"],
+                    "partition_by": ["partition_date"],
                 },
                 "incremental": {
                     "strategy": "partition_replace",
@@ -62,10 +62,10 @@ def test_dataset_and_feature_configs_parse_incremental_blocks() -> None:
     feature = FeatureConfig.from_dict(
         {
             "features": {
-                "name": "runner_features",
+                "name": "entity_features",
                 "grain": {
                     "type": "entity",
-                    "entity_keys": ["dog_key"],
+                    "entity_keys": ["entity_id"],
                 },
                 "incremental": {
                     "strategy": "entity_state_update",
@@ -76,12 +76,12 @@ def test_dataset_and_feature_configs_parse_incremental_blocks() -> None:
     )
 
     assert dataset.grain is not None
-    assert dataset.grain.partition_by == ["race_date"]
+    assert dataset.grain.partition_by == ["partition_date"]
     assert dataset.incremental is not None
     assert dataset.incremental.strategy == "partition_replace"
 
     assert feature.grain is not None
     assert feature.grain.type == "entity"
-    assert feature.grain.entity_keys == ["dog_key"]
+    assert feature.grain.entity_keys == ["entity_id"]
     assert feature.incremental is not None
     assert feature.incremental.strategy == "entity_state_update"

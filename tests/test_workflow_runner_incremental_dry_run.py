@@ -11,29 +11,29 @@ def test_workflow_runner_dry_run_returns_incremental_plan(tmp_path: Path) -> Non
 name: incremental_demo
 params: {}
 tasks:
-  - name: normalize_signals
+  - name: normalize_source_records
     type: custom
     config: dummy.yaml
     incremental:
       strategy: key_upsert
-      sources: [grv_signals]
+      sources: [source_records]
     grain:
       type: key
-      primary_key: [race_date, race_number, dog_key]
-  - name: update_dog_state
+      primary_key: [partition_date, group_id, entity_id]
+  - name: update_entity_state
     type: custom
     config: dummy.yaml
-    depends_on: [normalize_signals]
+    depends_on: [normalize_source_records]
     incremental:
       strategy: entity_state_update
       change_propagation:
-        - upstream: normalize_signals
+        - upstream: normalize_source_records
           propagation_mode: entity
           key_mapping:
-            dog_key: dog_key
+            entity_id: entity_id
     grain:
       type: entity
-      entity_keys: [dog_key]
+      entity_keys: [entity_id]
 """,
         encoding="utf-8",
     )
@@ -44,11 +44,11 @@ tasks:
         dry_run=True,
         changes=[
             {
-                "source_name": "grv_signals",
+                "source_name": "source_records",
                 "change_type": "upsert",
-                "primary_key": {"race_date": "2026-01-01", "race_number": 1, "dog_key": "dog-1"},
-                "entity_keys": {"dog_key": "dog-1"},
-                "partition_keys": {"race_date": "2026-01-01"},
+                "primary_key": {"partition_date": "2026-01-01", "group_id": 1, "entity_id": "entity-1"},
+                "entity_keys": {"entity_id": "entity-1"},
+                "partition_keys": {"partition_date": "2026-01-01"},
             }
         ],
     )
@@ -56,9 +56,9 @@ tasks:
     assert result["incremental_plan"] is not None
     assert len(result["incremental_plan"]["changes"]) == 1
     work_units = {unit["node_name"]: unit for unit in result["incremental_plan"]["work_units"]}
-    assert work_units["normalize_signals"]["keys"] == {
-        "race_date": "2026-01-01",
-        "race_number": 1,
-        "dog_key": "dog-1",
+    assert work_units["normalize_source_records"]["keys"] == {
+        "partition_date": "2026-01-01",
+        "group_id": 1,
+        "entity_id": "entity-1",
     }
-    assert work_units["update_dog_state"]["keys"] == {"dog_key": "dog-1"}
+    assert work_units["update_entity_state"]["keys"] == {"entity_id": "entity-1"}

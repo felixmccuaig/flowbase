@@ -15,15 +15,15 @@ def test_incremental_planner_matches_fixture_work_units(tmp_path: Path) -> None:
         dry_run=True,
         changes=[
             {
-                "source_name": "grv_signals",
+                "source_name": "source_records",
                 "change_type": "upsert",
                 "primary_key": {
-                    "race_date": "2026-01-01",
-                    "race_number": 1,
-                    "dog_key": "dog-1",
+                    "partition_date": "2026-01-01",
+                    "group_id": 1,
+                    "entity_id": "entity-1",
                 },
-                "entity_keys": {"dog_key": "dog-1"},
-                "partition_keys": {"race_date": "2026-01-01"},
+                "entity_keys": {"entity_id": "entity-1"},
+                "partition_keys": {"partition_date": "2026-01-01"},
             }
         ],
     )

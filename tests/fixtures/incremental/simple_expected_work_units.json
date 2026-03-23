@@ -1,28 +1,28 @@
 [
   {
-    "node_name": "normalize_signals",
+    "node_name": "normalize_source_records",
     "grain_type": "key",
     "keys": {
-      "race_date": "2026-01-01",
-      "race_number": 1,
-      "dog_key": "dog-1"
+      "partition_date": "2026-01-01",
+      "group_id": 1,
+      "entity_id": "entity-1"
     },
-    "reason": "source:grv_signals"
+    "reason": "source:source_records"
   },
   {
-    "node_name": "refresh_race_partition",
+    "node_name": "refresh_partition_slice",
     "grain_type": "partition",
     "keys": {
-      "race_date": "2026-01-01"
+      "partition_date": "2026-01-01"
     },
-    "reason": "downstream_of:normalize_signals"
+    "reason": "downstream_of:normalize_source_records"
   },
   {
-    "node_name": "update_dog_state",
+    "node_name": "update_entity_state",
     "grain_type": "entity",
     "keys": {
-      "dog_key": "dog-1"
+      "entity_id": "entity-1"
     },
-    "reason": "downstream_of:normalize_signals"
+    "reason": "downstream_of:normalize_source_records"
   }
 ]
