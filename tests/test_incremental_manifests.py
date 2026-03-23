@@ -7,7 +7,7 @@ from flowbase.incremental import (
     ChangeRecord,
     ManifestInput,
     build_manifest_event,
-    extract_manifest_dates,
+    extract_partition_values,
     load_manifest,
     write_manifest,
 )
@@ -32,10 +32,10 @@ class IncrementalManifestTest(TestCase):
                 ChangeRecord(
                     source="source_a",
                     change_type="upsert",
-                    grain="runner",
-                    primary_key={"race_date": "2026-03-23", "race_number": 1, "dog_key": "dog-1"},
-                    partition_keys={"race_date": "2026-03-23"},
-                    entity_keys={"dog_key": "dog-1"},
+                    grain="entity_record",
+                    primary_key={"record_id": "r1"},
+                    partition_keys={"partition_date": "2026-03-23"},
+                    entity_keys={"entity_id": "e1"},
                 )
             ],
         )
@@ -57,8 +57,8 @@ class IncrementalManifestTest(TestCase):
             "mode": "realtime",
             "input": {"normalized_uri": "x", "content_hash": "y", "record_count": 1},
             "changes": [
-                {"primary_key": {"race_date": "2026-03-23"}},
-                {"partition_keys": {"race_date": "2026-03-24"}},
+                {"primary_key": {"record_id": "r1"}},
+                {"partition_keys": {"partition_date": "2026-03-24"}},
             ],
         }
         event = build_manifest_event(
@@ -66,6 +66,8 @@ class IncrementalManifestTest(TestCase):
             manifest_uri="s3://bucket/manifest.json",
             workflow_name="wf",
             workflow_config_path="workflows/wf/workflow.yaml",
+            partition_values=["2026-03-23", "2026-03-24"],
         )
-        self.assertEqual(extract_manifest_dates(manifest), ["2026-03-23", "2026-03-24"])
+        self.assertEqual(extract_partition_values(manifest, "partition_date"), ["2026-03-24"])
         self.assertEqual(event.manifest_uri, "s3://bucket/manifest.json")
+        self.assertEqual(event.partition_values, ["2026-03-23", "2026-03-24"])

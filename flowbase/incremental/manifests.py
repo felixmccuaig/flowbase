@@ -124,7 +124,7 @@ class ManifestEvent:
     mode: str
     manifest_uri: str
     change_count: int
-    dates: list[str]
+    partition_values: list[str]
     workflow_name: str
     workflow_config_path: str
 
@@ -157,15 +157,19 @@ def upload_manifest(local_path: Path, bucket: str, key: str) -> str:
     return f"s3://{bucket}/{key}"
 
 
-def extract_manifest_dates(manifest: dict[str, Any]) -> list[str]:
-    dates: set[str] = set()
+def extract_partition_values(
+    manifest: dict[str, Any],
+    partition_field: str,
+    container_keys: Iterable[str] = ("primary_key", "partition_keys", "race_key"),
+) -> list[str]:
+    values: set[str] = set()
     for change in manifest.get("changes", []):
-        for container_key in ("primary_key", "partition_keys", "race_key"):
+        for container_key in container_keys:
             container = change.get(container_key) or {}
-            race_date = container.get("race_date")
-            if race_date:
-                dates.add(str(race_date))
-    return sorted(dates)
+            field_value = container.get(partition_field)
+            if field_value:
+                values.add(str(field_value))
+    return sorted(values)
 
 
 def build_manifest_event(
@@ -174,6 +178,7 @@ def build_manifest_event(
     manifest_uri: str,
     workflow_name: str,
     workflow_config_path: str,
+    partition_values: list[str] | None = None,
 ) -> ManifestEvent:
     payload = manifest.to_dict() if isinstance(manifest, ChangeManifest) else manifest
     return ManifestEvent(
@@ -186,7 +191,7 @@ def build_manifest_event(
         mode=str(payload["mode"]),
         manifest_uri=manifest_uri,
         change_count=len(payload.get("changes", [])),
-        dates=extract_manifest_dates(payload),
+        partition_values=sorted({str(value) for value in (partition_values or [])}),
         workflow_name=workflow_name,
         workflow_config_path=workflow_config_path,
     )
