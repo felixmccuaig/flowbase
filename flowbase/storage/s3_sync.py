@@ -23,7 +23,7 @@ class S3Sync:
 
         Args:
             bucket: S3 bucket name
-            prefix: Optional prefix for all S3 keys (e.g., "flowbase-greyhounds/")
+            prefix: Optional prefix for all S3 keys (e.g., "project-name/")
         """
         if not BOTO3_AVAILABLE:
             raise ImportError(

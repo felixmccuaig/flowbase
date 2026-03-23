@@ -58,11 +58,11 @@ def test_table_loader_local_first_prefers_local_when_available(tmp_path) -> None
 
     cfg = TableConfig.from_dict(
         {
-            "name": "runner_feature_serving",
+            "name": "entity_feature_serving",
             "storage": {"base_path": str(local_base), "format": "parquet"},
         }
     )
-    table = SimpleNamespace(name="runner_feature_serving", config=cfg)
+    table = SimpleNamespace(name="entity_feature_serving", config=cfg)
     engine = DuckDBEngine()
     try:
         loader = TableLoader(
@@ -89,11 +89,11 @@ def test_table_loader_local_first_falls_back_to_s3_when_local_missing(tmp_path) 
 
     cfg = TableConfig.from_dict(
         {
-            "name": "runner_feature_serving",
+            "name": "entity_feature_serving",
             "storage": {"base_path": str(local_base), "format": "parquet"},
         }
     )
-    table = SimpleNamespace(name="runner_feature_serving", config=cfg)
+    table = SimpleNamespace(name="entity_feature_serving", config=cfg)
     engine = DuckDBEngine()
     try:
         loader = TableLoader(

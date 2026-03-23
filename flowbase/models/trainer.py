@@ -30,7 +30,7 @@ class ModelTrainer:
         Args:
             models_dir: Directory to save trained models (relative or absolute)
             s3_bucket: Optional S3 bucket for syncing artifacts
-            s3_prefix: Optional S3 prefix (e.g., "flowbase-greyhounds/")
+            s3_prefix: Optional S3 prefix (e.g., "project-name/")
             data_root: Optional root directory for Lambda /tmp support
             query_engine_config: Optional DuckDB configuration dict
         """

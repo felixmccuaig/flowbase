@@ -684,17 +684,17 @@ def model_predict_from_features(model_name: str, features: str, where: str, sele
     """Make predictions by querying feature table/view.
 
     Examples:
-      # Predict for specific race and competitor
+      # Predict for specific event and entity
       flowbase model predict-from-features xgboost_base \\
-        -f data/features/greyhound_features.parquet \\
-        -w "event_id = '12345' AND competitor_id = '678'" \\
-        -s "event_id, competitor_id, competitor_name"
+        -f data/features/entity_features.parquet \\
+        -w "event_id = '12345' AND entity_id = '678'" \\
+        -s "event_id, entity_id, entity_name"
 
-      # Predict for all competitors in a race
+      # Predict for all entities in an event
       flowbase model predict-from-features xgboost_base \\
-        -f data/features/greyhound_features.parquet \\
+        -f data/features/entity_features.parquet \\
         -w "event_id = '12345'" \\
-        -s "event_id, competitor_id, competitor_name, box"
+        -s "event_id, entity_id, entity_name, group_slot"
     """
     from flowbase.models.trainer import ModelTrainer
     from pathlib import Path

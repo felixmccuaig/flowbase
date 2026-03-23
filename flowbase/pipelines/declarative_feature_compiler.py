@@ -12,8 +12,8 @@ class DeclarativeFeatureCompiler:
     """
     Compiles declarative feature specs to SQL with automatic windowing.
 
-    Designed for entity-based time-series data (e.g., greyhound races) where:
-    - Each row is an event for an entity (e.g., a greyhound in a race)
+    Designed for entity-based time-series data where:
+    - Each row is an event for an entity
     - Features look back at historical data for that entity
     - Time ordering is critical (no data leakage from future)
     """
