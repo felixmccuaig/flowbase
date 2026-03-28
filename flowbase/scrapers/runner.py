@@ -33,6 +33,57 @@ class ScraperRunner:
         with open(config_path, 'r') as f:
             return yaml.safe_load(f)
 
+    def run_from_spec(self, spec: Dict[str, Any], date: Optional[str] = None, **kwargs) -> Dict[str, Any]:
+        """Run a scraper from an in-memory spec."""
+        config = spec
+
+        if date:
+            scrape_date = datetime.strptime(date, "%Y-%m-%d")
+        else:
+            scrape_date = datetime.now()
+
+        scraper_fn = self.load_scraper_function(config["scraper"]["function"])
+
+        params = config["scraper"].get("parameters", {}).copy()
+        params.update(kwargs)
+
+        print(f"Running scraper: {config['name']}")
+        print(f"Date: {scrape_date.strftime('%Y-%m-%d')}")
+        print(f"Function: {config['scraper']['function']}")
+
+        result_df = scraper_fn(date=scrape_date, **params)
+
+        if not isinstance(result_df, pd.DataFrame):
+            raise TypeError(f"Scraper must return a pandas DataFrame, got {type(result_df)}")
+
+        print(f"Scraped {len(result_df)} rows")
+
+        output_config = config["output"]
+        table_config_path = output_config["table_config"]
+
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
+        temp_file = self.temp_dir / f"{config['name']}_{scrape_date.strftime('%Y%m%d')}.parquet"
+        result_df.to_parquet(temp_file, index=False)
+
+        print(f"Ingesting into table: {output_config['table']}")
+        ingest_result = self.table_manager.ingest(
+            table_name=output_config["table"],
+            config_path=table_config_path,
+            source_file=str(temp_file),
+            date=scrape_date.strftime("%Y-%m-%d"),
+            dataset_config_path=output_config.get("dataset_config"),
+        )
+
+        temp_file.unlink()
+
+        print("✓ Scraper completed successfully")
+
+        return {
+            "rows": len(result_df),
+            "destination": ingest_result.get("destination"),
+            "date": scrape_date.strftime("%Y-%m-%d"),
+        }
+
     def load_scraper_function(self, function_path: str) -> Callable:
         """Load a scraper function from a Python file.
 
@@ -79,62 +130,7 @@ class ScraperRunner:
             Dictionary with scraping results including row count and destination
         """
         config = self.load_config(config_path)
-
-        # Parse date
-        if date:
-            scrape_date = datetime.strptime(date, "%Y-%m-%d")
-        else:
-            scrape_date = datetime.now()
-
-        # Load scraper function
-        scraper_fn = self.load_scraper_function(config["scraper"]["function"])
-
-        # Merge config parameters with runtime kwargs
-        params = config["scraper"].get("parameters", {}).copy()
-        params.update(kwargs)
-
-        print(f"Running scraper: {config['name']}")
-        print(f"Date: {scrape_date.strftime('%Y-%m-%d')}")
-        print(f"Function: {config['scraper']['function']}")
-
-        # Run the scraper
-        result_df = scraper_fn(date=scrape_date, **params)
-
-        if not isinstance(result_df, pd.DataFrame):
-            raise TypeError(f"Scraper must return a pandas DataFrame, got {type(result_df)}")
-
-        print(f"Scraped {len(result_df)} rows")
-
-        # Get output configuration
-        output_config = config["output"]
-        table_config_path = output_config["table_config"]
-
-        # Save to temporary parquet file
-        self.temp_dir.mkdir(parents=True, exist_ok=True)
-        temp_file = self.temp_dir / f"{config['name']}_{scrape_date.strftime('%Y%m%d')}.parquet"
-        result_df.to_parquet(temp_file, index=False)
-
-        # Ingest into table
-        print(f"Ingesting into table: {output_config['table']}")
-        ingest_result = self.table_manager.ingest(
-            table_name=output_config["table"],
-            config_path=table_config_path,
-            source_file=str(temp_file),
-            date=scrape_date.strftime("%Y-%m-%d"),
-            dataset_config_path=output_config.get("dataset_config")
-        )
-
-        # Clean up temp file
-        temp_file.unlink()
-
-        print("✓ Scraper completed successfully")
-
-        # Return results
-        return {
-            "rows": len(result_df),
-            "destination": ingest_result.get("destination"),
-            "date": scrape_date.strftime("%Y-%m-%d"),
-        }
+        return self.run_from_spec(config, date=date, **kwargs)
 
     def list_scrapers(self, scrapers_dir: str = "scrapers") -> list:
         """List all available scraper configs.

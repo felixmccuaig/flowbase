@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 import traceback
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -14,6 +15,7 @@ from typing import Any, Dict, List, Optional
 import yaml
 
 from flowbase.incremental import ChangeEvent, IncrementalPlanner, build_graph_from_workflow_tasks
+from flowbase.registry import load_provider_function
 
 
 class TaskType(str, Enum):
@@ -77,6 +79,8 @@ class WorkflowRunner:
         self.log_file: Optional[Path] = None
         self.project_config: Optional[Dict[str, Any]] = None
         self.s3_sync = None
+        self._generated_workflow_provider = None
+        self._generated_scraper_provider = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -92,6 +96,7 @@ class WorkflowRunner:
         try:
             with open(flowbase_config_path, 'r') as f:
                 self.project_config = yaml.safe_load(f)
+            self._initialize_registry_providers(project_root)
 
             # Check if S3 sync is enabled
             storage_config = self.project_config.get('storage', {})
@@ -111,6 +116,23 @@ class WorkflowRunner:
 
         except Exception as e:
             self.logger.warning(f"Failed to load project config: {e}")
+
+    def _initialize_registry_providers(self, project_root: Path) -> None:
+        """Initialize optional generated workflow/scraper providers from flowbase.yaml."""
+        config = self.project_config if isinstance(self.project_config, dict) else {}
+        workflow_provider_spec = config.get("generated_workflows_provider")
+        scraper_provider_spec = config.get("generated_scrapers_provider")
+
+        if workflow_provider_spec:
+            self._generated_workflow_provider = load_provider_function(
+                str(workflow_provider_spec),
+                project_root=project_root,
+            )
+        if scraper_provider_spec:
+            self._generated_scraper_provider = load_provider_function(
+                str(scraper_provider_spec),
+                project_root=project_root,
+            )
 
     @staticmethod
     def _coerce_bool(value: Any) -> Optional[bool]:
@@ -196,18 +218,27 @@ class WorkflowRunner:
         config_path: Optional[str] = None
     ) -> tuple[Dict[str, Any], Path]:
         """Load a workflow config."""
+        project_root = self._find_project_root(self.base_dir)
+        if self.project_config is None:
+            self._load_project_config(project_root)
+
         if config_path:
             candidate = Path(config_path)
         else:
             candidate = self._discover_default_config(workflow_name)
 
-        if not candidate.exists():
-            raise FileNotFoundError(f"Workflow config not found: {candidate}")
+        if candidate.exists():
+            with candidate.open("r", encoding="utf-8") as f:
+                config = yaml.safe_load(f) or {}
+            return config, candidate
 
-        with candidate.open("r", encoding="utf-8") as f:
-            config = yaml.safe_load(f) or {}
+        if self._generated_workflow_provider is not None:
+            generated = self._generated_workflow_provider(workflow_name)
+            if generated:
+                synthetic_path = project_root / ".generated_workflows" / workflow_name / "workflow.yaml"
+                return deepcopy(generated), synthetic_path
 
-        return config, candidate
+        raise FileNotFoundError(f"Workflow config not found: {candidate}")
 
     def run(
         self,
@@ -623,22 +654,11 @@ class WorkflowRunner:
         """Run a scraper task."""
         from flowbase.scrapers.runner import ScraperRunner
 
+        project_root = self._find_project_root(config_dir.resolve())
+
         # Resolve config path relative to project root
         config_path = self._resolve_task_config_path(task.config, config_dir)
 
-        # Find project root and load config for S3 sync
-        search_dir = Path(config_path).parent.resolve()
-        project_root = None
-        while search_dir != search_dir.parent:
-            if (search_dir / "data").exists() or (search_dir / "models").exists():
-                project_root = search_dir
-                break
-            search_dir = search_dir.parent
-
-        if not project_root:
-            project_root = Path(config_path).parent.parent
-
-        # Load project config if not already loaded
         if not self.project_config:
             self._load_project_config(project_root)
 
@@ -652,7 +672,20 @@ class WorkflowRunner:
         data_root = os.environ.get('FLOWBASE_DATA_ROOT')
 
         runner = ScraperRunner(metadata_db=metadata_db, temp_dir=temp_dir, data_root=data_root)
-        result = runner.run(config_path, date=date)
+        if task.config.startswith("registry:"):
+            if self._generated_scraper_provider is None:
+                raise ValueError(
+                    f"Task '{task.name}' uses registry scraper config '{task.config}' but no generated_scrapers_provider is configured"
+                )
+            scraper_name = task.config.split(":", 1)[1]
+            scraper_spec = self._generated_scraper_provider(scraper_name)
+            if not scraper_spec:
+                raise ValueError(f"Generated scraper spec not found for '{scraper_name}'")
+            result = runner.run_from_spec(scraper_spec, date=date)
+            resolved_config = task.config
+        else:
+            result = runner.run(config_path, date=date)
+            resolved_config = config_path
 
         # Sync ingested file to S3 if enabled
         s3_url = None
@@ -682,7 +715,7 @@ class WorkflowRunner:
 
         return {
             "type": "scraper",
-            "config": config_path,
+            "config": resolved_config,
             "date": date,
             "row_count": result.get("rows", 0) if result else 0,
             "destination": result.get("destination") if result else None,
