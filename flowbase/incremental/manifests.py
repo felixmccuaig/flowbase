@@ -203,6 +203,7 @@ def publish_manifest_event(
     event_bus_name: str | None = None,
     source: str = "flowbase.manifest",
     detail_type: str = "change_manifest.created",
+    recorder: Any | None = None,
 ) -> dict[str, Any]:
     if boto3 is None:  # pragma: no cover
         raise RuntimeError("boto3 is required to publish manifest events")
@@ -216,4 +217,19 @@ def publish_manifest_event(
     response = boto3.client("events").put_events(Entries=[entry])
     if int(response.get("FailedEntryCount", 0)):
         raise RuntimeError(f"Failed to publish manifest event: {json.dumps(response, default=str)}")
+    if recorder is not None:
+        recorder.emit(
+            event_type="manifest_published",
+            workflow_name=manifest_event.workflow_name,
+            run_id=manifest_event.run_id,
+            phase="manifest",
+            status="success",
+            details={
+                "manifest_uri": manifest_event.manifest_uri,
+                "change_count": manifest_event.change_count,
+                "source": manifest_event.source,
+                "normalized_dataset": manifest_event.normalized_dataset,
+                "event_bus_name": event_bus_name,
+            },
+        )
     return response

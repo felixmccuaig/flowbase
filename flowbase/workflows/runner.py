@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 import yaml
 
 from flowbase.incremental import ChangeEvent, IncrementalPlanner, build_graph_from_workflow_tasks
+from flowbase.observability import build_observability_recorder
 from flowbase.registry import load_provider_function
 
 
@@ -81,6 +82,7 @@ class WorkflowRunner:
         self.s3_sync = None
         self._generated_workflow_provider = None
         self._generated_scraper_provider = None
+        self.observability = build_observability_recorder(None)
 
     # ------------------------------------------------------------------
     # Public API
@@ -97,6 +99,7 @@ class WorkflowRunner:
             with open(flowbase_config_path, 'r') as f:
                 self.project_config = yaml.safe_load(f)
             self._initialize_registry_providers(project_root)
+            self.observability = build_observability_recorder(self.project_config)
 
             # Check if S3 sync is enabled
             storage_config = self.project_config.get('storage', {})
@@ -273,6 +276,7 @@ class WorkflowRunner:
 
         # Resolve template variables
         template_vars = self._build_template_vars(config, runtime_params)
+        run_id = self.observability.new_run_id(config.get("name", workflow_name))
 
         # Parse tasks
         tasks = self._parse_tasks(config.get("tasks", []))
@@ -308,6 +312,18 @@ class WorkflowRunner:
         # Execute tasks in order
         results: List[TaskResult] = []
         task_outputs: Dict[str, Any] = {}
+        workflow_started_at = datetime.utcnow()
+
+        self.observability.emit(
+            event_type="run_started",
+            workflow_name=config.get("name", workflow_name),
+            run_id=run_id,
+            status="running",
+            details={
+                "config_path": str(config_file),
+                "params": runtime_params,
+            },
+        )
 
         self.logger.info(f"Executing {len(execution_order)} tasks")
 
@@ -317,11 +333,21 @@ class WorkflowRunner:
             # Check dependencies
             if not self._check_dependencies(task, results):
                 self.logger.warning(f"Task {task.name} skipped: dependencies failed")
-                results.append(TaskResult(
+                skipped = TaskResult(
                     name=task.name,
                     status=TaskStatus.SKIPPED,
                     error="Dependencies failed"
-                ))
+                )
+                results.append(skipped)
+                self.observability.emit(
+                    event_type="task_finished",
+                    workflow_name=config.get("name", workflow_name),
+                    run_id=run_id,
+                    task_name=task.name,
+                    phase="task",
+                    status=TaskStatus.SKIPPED.value,
+                    details={"reason": "dependencies_failed"},
+                )
                 continue
 
             # Evaluate condition
@@ -329,12 +355,32 @@ class WorkflowRunner:
                 task.condition, template_vars, task_outputs
             ):
                 self.logger.warning(f"Task {task.name} skipped: condition not met: {task.condition}")
-                results.append(TaskResult(
+                skipped = TaskResult(
                     name=task.name,
                     status=TaskStatus.SKIPPED,
                     error=f"Condition not met: {task.condition}"
-                ))
+                )
+                results.append(skipped)
+                self.observability.emit(
+                    event_type="task_finished",
+                    workflow_name=config.get("name", workflow_name),
+                    run_id=run_id,
+                    task_name=task.name,
+                    phase="task",
+                    status=TaskStatus.SKIPPED.value,
+                    details={"reason": "condition_not_met", "condition": task.condition},
+                )
                 continue
+
+            self.observability.emit(
+                event_type="task_started",
+                workflow_name=config.get("name", workflow_name),
+                run_id=run_id,
+                task_name=task.name,
+                phase="task",
+                status="running",
+                details={"task_type": task.task_type.value},
+            )
 
             # Execute task
             result = self._execute_task(
@@ -352,6 +398,20 @@ class WorkflowRunner:
             if result.output:
                 task_outputs[task.name] = result.output
 
+            self.observability.emit(
+                event_type="task_finished",
+                workflow_name=config.get("name", workflow_name),
+                run_id=run_id,
+                task_name=task.name,
+                phase="task",
+                status=result.status.value,
+                details={
+                    "duration_seconds": result.duration_seconds,
+                    "error": result.error,
+                    "output": result.output,
+                },
+            )
+
         success = all(
             r.status in {TaskStatus.SUCCESS, TaskStatus.SKIPPED}
             for r in results
@@ -362,6 +422,19 @@ class WorkflowRunner:
         else:
             self.logger.error("Workflow completed with errors")
 
+        self.observability.emit(
+            event_type="run_finished",
+            workflow_name=config.get("name", workflow_name),
+            run_id=run_id,
+            phase="run",
+            status="success" if success else "failed",
+            details={
+                "duration_seconds": (datetime.utcnow() - workflow_started_at).total_seconds(),
+                "result_count": len(results),
+                "success": success,
+            },
+        )
+
         return {
             "workflow": config.get("name", workflow_name),
             "config_path": str(config_file),
@@ -369,6 +442,7 @@ class WorkflowRunner:
             "template_vars": template_vars,
             "results": [self._result_to_dict(r) for r in results],
             "success": success,
+            "run_id": run_id,
         }
 
     def list_workflows(self) -> List[str]:
