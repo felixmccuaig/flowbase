@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import inspect
 import re
 import traceback
 from copy import deepcopy
@@ -26,6 +27,7 @@ class TaskType(str, Enum):
     FEATURES = "features"
     INFERENCE = "inference"
     CUSTOM = "custom"
+    PYTHON = "python"
     ROLLUP = "rollup"
     TRANSFORM = "transform"
 
@@ -242,6 +244,29 @@ class WorkflowRunner:
                 return deepcopy(generated), synthetic_path
 
         raise FileNotFoundError(f"Workflow config not found: {candidate}")
+
+    def _resolve_python_callable_spec(
+        self,
+        task: WorkflowTask,
+        config_dir: Path,
+    ) -> tuple[str, Dict[str, Any]]:
+        """Resolve a python task into a callable spec and optional config params."""
+        config_value = str(task.config).strip()
+        if ":" in config_value and not config_value.endswith((".yaml", ".yml")):
+            return config_value, {}
+
+        config_path = self._resolve_task_config_path(task.config, config_dir)
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f) or {}
+
+        callable_spec = str(config.get("callable", "")).strip()
+        if not callable_spec:
+            raise ValueError(f"Python task config missing 'callable': {config_path}")
+
+        config_params = config.get("params", {})
+        if not isinstance(config_params, dict):
+            raise ValueError(f"Python task config 'params' must be a mapping: {config_path}")
+        return callable_spec, config_params
 
     def run(
         self,
@@ -663,6 +688,8 @@ class WorkflowRunner:
                 output = self._run_inference(task, config_dir, all_params)
             elif task.task_type == TaskType.CUSTOM:
                 output = self._run_custom(task, config_dir, all_params)
+            elif task.task_type == TaskType.PYTHON:
+                output = self._run_python(task, config_dir, all_params)
             elif task.task_type == TaskType.ROLLUP:
                 output = self._run_rollup(task, config_dir, all_params)
             elif task.task_type == TaskType.TRANSFORM:
@@ -1418,6 +1445,56 @@ class WorkflowRunner:
             "outputs": outputs if outputs else None,
             "s3_urls": s3_urls if s3_urls else None,
             **output_data
+        }
+
+    def _run_python(
+        self,
+        task: WorkflowTask,
+        config_dir: Path,
+        params: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Run an in-process Python callable task."""
+        project_root = self._find_project_root(config_dir.resolve())
+        if not self.project_config:
+            self._load_project_config(project_root)
+
+        callable_spec, config_params = self._resolve_python_callable_spec(task, config_dir)
+        resolved_config_params = self._substitute_templates(config_params, params)
+        call_params = {**resolved_config_params, **params}
+
+        target = load_provider_function(callable_spec, project_root=project_root)
+        signature = inspect.signature(target)
+        accepts_var_kwargs = any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
+        )
+
+        context_kwargs = {
+            "project_root": project_root,
+            "workflow_task_name": task.name,
+            "logger": self.logger,
+        }
+        filtered_context = {
+            key: value
+            for key, value in context_kwargs.items()
+            if accepts_var_kwargs or key in signature.parameters
+        }
+        filtered_params = {
+            key: value
+            for key, value in call_params.items()
+            if accepts_var_kwargs or key in signature.parameters
+        }
+
+        self.logger.info(f"Running python task callable: {callable_spec}")
+        result = target(**filtered_params, **filtered_context)
+        if result is None:
+            return {"type": "python", "callable": callable_spec}
+        if not isinstance(result, dict):
+            return {"type": "python", "callable": callable_spec, "result": result}
+        return {
+            "type": "python",
+            "callable": callable_spec,
+            **result,
         }
 
     def _run_rollup(
