@@ -8,7 +8,7 @@ import re
 import traceback
 from copy import deepcopy
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -508,7 +508,7 @@ class WorkflowRunner:
         template_vars = {
             # Date/time variables
             "today": now.strftime("%Y-%m-%d"),
-            "yesterday": (now.replace(day=now.day - 1)).strftime("%Y-%m-%d"),
+            "yesterday": (now - timedelta(days=1)).strftime("%Y-%m-%d"),
             "now": now.isoformat(),
             "year": now.strftime("%Y"),
             "month": now.strftime("%m"),
